@@ -1,6 +1,10 @@
 package chisel3.experimental.cacheable
 
 import chisel3._
+import chisel3.experimental.hierarchy._
+import chisel3.experimental.SourceInfo
+import chisel3.internal.Builder
+import chisel3.internal.firrtl.ir
 
 abstract class CacheableModuleBase extends Module {
   import CacheableModuleBase.currentEnv
@@ -27,6 +31,10 @@ abstract class CacheableModuleBase extends Module {
 
   private val nonCacheableScope = new NonCacheable
 
+  private var _cachePlan: Option[CachePlan] = None
+
+  private[cacheable] final def cachePlan: Option[CachePlan] = _cachePlan
+
   protected final def nonCacheable[T](body: NonCacheable => T): T = {
     require(
       !currentEnv.cacheable,
@@ -35,12 +43,26 @@ abstract class CacheableModuleBase extends Module {
     body(nonCacheableScope)
   }
 
-  private final def elaborateCacheable(): Unit = {
+  private final def elaborateCacheable(implicit sourceInfo: SourceInfo): Unit = {
     require(
       currentEnv.cacheable,
       "cacheable() must be elaborated in a cacheable environment"
     )
-    cacheable()
+    val placeholder = new ir.Placeholder(sourceInfo)
+    val block = Builder.currentBlock.get
+    val beforeIds = _ids.toSet
+    val state = Builder.State.save
+    Builder.State.guard(state) {
+      block.appendToPlaceholder(placeholder) {
+        cacheable()
+      }
+    }
+    val (_, commands) = ir.Placeholder.unapply(placeholder).get
+    _cachePlan = Some(CachePlan.capture(beforeIds, _ids.toSet, commands))
+    // Keep the first implementation behaviorally complete until the synthetic-module materializer
+    // consumes this plan.  The placeholder is still detached while capture runs, so append it
+    // after analysis to retain the region in the enclosing module.
+    block.addCommand(placeholder)
   }
 
   def cacheable(): Unit
@@ -70,7 +92,7 @@ object CacheableModuleBase {
     inEnv(Env(cacheable = false)) {
       val module = bc
       inEnv(Env(cacheable = true)) {
-        module.elaborateCacheable()
+        module.elaborateCacheable
       }
       module
     }

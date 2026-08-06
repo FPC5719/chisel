@@ -8,9 +8,9 @@ import chisel3.internal.BuilderContextCache
 import chisel3.internal.firrtl.ir
 
 abstract class CacheableModuleBase extends Module {
-  import CacheableModuleBase.currentEnv
+  import CacheableModuleBase.{currentEnv, CacheKey}
 
-  protected final class NonCacheable() {
+  protected object NonCacheable {
     def unwrap(eff: SideEffect[Unit], name: String = ""): Unit = {
       require(
         !currentEnv.cacheable,
@@ -30,21 +30,12 @@ abstract class CacheableModuleBase extends Module {
     }
   }
 
-  private val nonCacheableScope = new NonCacheable
-
-  /** Cache discriminator for the synthetic cacheable definition.
-    *
-    * Override this when constructor parameters or external configuration alter `cacheable()`.
-    * Values must have stable `equals`/`hashCode` during one elaboration.
-    */
-  protected def cacheKey: Any = getClass
-
-  protected final def nonCacheable[T](body: NonCacheable => T): T = {
+  protected final def nonCacheable[T](body: NonCacheable.type => T): T = {
     require(
       !currentEnv.cacheable,
       "Must not enter a non-cacheable scope from a cacheable environment"
     )
-    body(nonCacheableScope)
+    body(NonCacheable)
   }
 
   private final def elaborateCacheable(implicit sourceInfo: SourceInfo): Unit = {
@@ -53,12 +44,7 @@ abstract class CacheableModuleBase extends Module {
       "cacheable() must be elaborated in a cacheable environment"
     )
     val preCacheableIds = _ids.toIndexedSeq
-    val shape = preCacheableIds.map {
-      case data: Data =>
-        data.typeName + ":" + getRecursiveFields.noPath(data).map(_.typeName).mkString("[")
-      case other => other.getClass.getName
-    }
-    val key = CacheableModuleBase.CacheKey(cacheKey, Module.currentModulePrefix, Builder.elideLayerBlocks, shape)
+    val key = CacheKey(cacheKey)
     Builder.contextCache.get(key) match {
       case Some(cached) =>
         CachePlan.instantiate(cached, preCacheableIds)
@@ -79,15 +65,19 @@ abstract class CacheableModuleBase extends Module {
     }
   }
 
-  def cacheable(): Unit
+  /** Cache discriminator for the synthetic cacheable definition.
+    *
+    * Override this when constructor parameters or external configuration alter `cacheable()`.
+    * Values must have stable `equals`/`hashCode` during one elaboration.
+    */
+  protected def cacheKey: Any = getClass
+
+  protected def cacheable(): Unit
 }
 
 object CacheableModuleBase {
-  private final case class CacheKey(
-    key:               Any,
-    modulePrefix:      String,
-    elideLayerBlocks:  Boolean,
-    preCacheableShape: Seq[String]
+  private case class CacheKey(
+    key: Any
   ) extends BuilderContextCache.Key[CachePlan.CachedPlan]
 
   private case class Env(cacheable: Boolean)

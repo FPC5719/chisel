@@ -1,5 +1,10 @@
 package chisel3.experimental.cacheable
 
+/** A lazy, re-runnable elaboration effect.
+  *
+  * Constructing an effect does not evaluate it. Each call to `NonCacheable.unwrap` evaluates the
+  * effect once; unwrapping the same effect value multiple times evaluates it multiple times.
+  */
 sealed trait SideEffect[T] {
   def map[U](f: T => U): SideEffect[U] = MapEffect(this, f)
 

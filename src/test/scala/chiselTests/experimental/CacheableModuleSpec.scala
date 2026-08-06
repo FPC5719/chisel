@@ -16,6 +16,15 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     var cacheableRuns = 0
   }
 
+  private object CacheKeyCounter {
+    var firstRuns = 0
+    var secondRuns = 0
+  }
+
+  private object PathCounter {
+    var cacheableRuns = 0
+  }
+
   private class EffectModule extends CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
@@ -129,6 +138,115 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     second.io.in := io.in
     io.out0 := first.io.out
     io.out1 := second.io.out
+  }
+
+  private class FirstKeyModule extends CacheableModule {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+
+    override protected def cacheKey: Any = 0
+
+    def cacheable(): Unit = {
+      CacheKeyCounter.firstRuns += 1
+      io.out := io.in
+    }
+  }
+
+  private class SecondKeyModule extends CacheableModule {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+
+    override protected def cacheKey: Any = 0
+
+    def cacheable(): Unit = {
+      CacheKeyCounter.secondRuns += 1
+      io.out := io.in + 1.U
+    }
+  }
+
+  private class CacheKeyTop extends Module {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val first = Output(UInt(8.W))
+      val second = Output(UInt(8.W))
+    })
+    val first = CacheableModule(new FirstKeyModule)
+    val second = CacheableModule(new SecondKeyModule)
+
+    first.io.in := io.in
+    second.io.in := io.in
+    io.first := first.io.out
+    io.second := second.io.out
+  }
+
+  private class PathBoundModule(addLeadingState: Boolean) extends CacheableModule {
+    if (addLeadingState) {
+      val unrelated = Wire(UInt(8.W)).suggestName("unrelated")
+      unrelated := 0.U
+    }
+
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+
+    def cacheable(): Unit = {
+      PathCounter.cacheableRuns += 1
+      io.out := io.in
+    }
+  }
+
+  private class PathBoundTop extends Module {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out0 = Output(UInt(8.W))
+      val out1 = Output(UInt(8.W))
+    })
+    val first = CacheableModule(new PathBoundModule(addLeadingState = false))
+    val second = CacheableModule(new PathBoundModule(addLeadingState = true))
+
+    first.io.in := io.in
+    second.io.in := io.in
+    io.out0 := first.io.out
+    io.out1 := second.io.out
+  }
+
+  private class MixedCaptureModule extends CacheableModule {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+    private val state = Wire(UInt(8.W)).suggestName("state")
+
+    def cacheable(): Unit = {
+      state := io.in
+      io.out := state
+    }
+  }
+
+  private class PlainPassModule extends Module {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+    io.out := io.in
+  }
+
+  private class NonDataLocalModule extends CacheableModule {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+
+    def cacheable(): Unit = {
+      val nested = Module(new PlainPassModule)
+      nested.io.in := io.in
+      io.out := nested.io.out
+    }
   }
 
   private class InnerCacheableModule extends CacheableModule {
@@ -272,6 +390,42 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
            |""".stripMargin
       )
     CacheCounter.cacheableRuns shouldBe 1
+  }
+
+  it should "scope custom cache keys to the cacheable module class" in {
+    CacheKeyCounter.firstRuns = 0
+    CacheKeyCounter.secondRuns = 0
+    ChiselStage.emitCHIRRTL(new CacheKeyTop)
+
+    CacheKeyCounter.firstRuns shouldBe 1
+    CacheKeyCounter.secondRuns shouldBe 1
+  }
+
+  it should "bind cached captures by structural path rather than construction order" in {
+    PathCounter.cacheableRuns = 0
+    ChiselStage.emitCHIRRTL(new PathBoundTop)
+
+    PathCounter.cacheableRuns shouldBe 1
+  }
+
+  it should "reject captures that are both read and written" in {
+    val error = the[IllegalArgumentException] thrownBy {
+      ChiselStage.emitCHIRRTL(new Module {
+        val child = CacheableModule(new MixedCaptureModule)
+      })
+    }
+
+    error.getMessage should include("both read and written")
+  }
+
+  it should "reject non-Data local definitions" in {
+    val error = the[IllegalArgumentException] thrownBy {
+      ChiselStage.emitCHIRRTL(new Module {
+        val child = CacheableModule(new NonDataLocalModule)
+      })
+    }
+
+    error.getMessage should include("only support Data local definitions")
   }
 
   it should "restore the construction environment after a nested cacheable module" in {

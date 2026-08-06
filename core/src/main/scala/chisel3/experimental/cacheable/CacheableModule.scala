@@ -43,42 +43,41 @@ abstract class CacheableModuleBase extends Module {
       currentEnv.cacheable,
       "cacheable() must be elaborated in a cacheable environment"
     )
-    val preCacheableIds = _ids.toIndexedSeq
-    val key = CacheKey(cacheKey)
-    Builder.contextCache.get(key) match {
-      case Some(cached) =>
-        CachePlan.instantiate(cached, preCacheableIds)
-      case None =>
-        val placeholder = new ir.Placeholder(sourceInfo)
-        val block = Builder.currentBlock.get
-        val state = Builder.State.save
-        Builder.State.guard(state) {
-          block.appendToPlaceholder(placeholder) {
-            cacheable()
-          }
+    val beforeIds = _ids.toIndexedSeq
+    val key = CacheKey(getClass, cacheKey)
+    val cached = Builder.contextCache.get(key).getOrElse {
+      val placeholder = new ir.Placeholder(sourceInfo)
+      val state = Builder.State.save
+      Builder.State.guard(state) {
+        Builder.currentBlock.get.appendToPlaceholder(placeholder) {
+          cacheable()
         }
-        val (_, commands) = ir.Placeholder.unapply(placeholder).get
-        val plan = CachePlan.capture(preCacheableIds.toSet, _ids.toSet, commands)
-        val cached = CachePlan.cache(plan, preCacheableIds)
-        Builder.contextCache.put(key, cached)
-        CachePlan.instantiate(cached, preCacheableIds)
+      }
+      val (_, commands) = ir.Placeholder.unapply(placeholder).get
+      val captured = CachePlan.capture(beforeIds, _ids.toIndexedSeq, commands)
+      val cached = CachePlan.cache(captured)
+      Builder.contextCache.put(key, cached)
+      cached
     }
+    CachePlan.instantiate(cached, beforeIds)
   }
 
-  /** Cache discriminator for the synthetic cacheable definition.
-    *
-    * Override this when constructor parameters or external configuration alter `cacheable()`.
+  /** Additional cache discriminator for the synthetic cacheable definition.
+   *
+    * The module class is always part of the cache identity. Override this when constructor
+    * parameters or external configuration alter `cacheable()`.
     * Values must have stable `equals`/`hashCode` during one elaboration.
     */
-  protected def cacheKey: Any = getClass
+  protected def cacheKey: Any = ()
 
   protected def cacheable(): Unit
 }
 
 object CacheableModuleBase {
   private case class CacheKey(
-    key: Any
-  ) extends BuilderContextCache.Key[CachePlan.CachedPlan]
+    moduleClass: Class[_],
+    key:         Any
+  ) extends BuilderContextCache.Key[CachePlan.CachedRegion]
 
   private case class Env(cacheable: Boolean)
 

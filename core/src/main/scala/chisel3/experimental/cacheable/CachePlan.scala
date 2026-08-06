@@ -11,38 +11,33 @@ import chisel3.internal.binding._
 import chisel3.internal.firrtl.ir
 import chisel3.reflect.DataMirror
 
-import scala.collection.immutable.ListMap
+import scala.collection.immutable.VectorMap
 import scala.collection.mutable
-
-/** The result of capturing one cacheable command region.
-  *
-  * This is deliberately an internal representation for now.  Commands still refer to the
-  * prototype module's ids; the captures describe the references which must be re-bound when the
-  * plan is materialized in a synthetic module.
-  */
-private[cacheable] final case class CachePlan(
-  commands: Seq[ir.Command],
-  localIds: Set[HasId],
-  captures: Seq[CachePlan.Capture]
-)
 
 private[cacheable] object CachePlan {
   sealed trait Access
   case object Read extends Access
   case object Write extends Access
 
-  final case class Capture(id: HasId, accesses: Set[Access]) {
-    def data: Option[Data] = id match {
-      case value: Data => Some(value)
-      case _ => None
-    }
+  /** A temporary miss-path representation.  It intentionally refers to prototype IDs. */
+  final case class CapturedRegion(
+    commands: Seq[ir.Command],
+    localIds: Seq[Data],
+    captures: Seq[Capture]
+  )
+
+  /** A pre-cacheable Data reference and its only permitted access mode. */
+  final case class Capture(id: Data, access: Access, path: CapturePath)
+
+  /** A stable relative path from a named pre-cacheable root to a Data leaf. */
+  final case class CapturePath(value: String) {
+    require(value.nonEmpty, "Cacheable capture paths must not be empty")
   }
 
   /** Mapping used when a captured command region is copied into another module.
     *
-    * Read and write mappings are intentionally separate.  A surrounding wire can be both read
-    * and written by a region, in which case the synthetic module needs an input and an output
-    * port rather than one ambiguous replacement.
+    * Read and write mappings remain separate because the copied IR carries access mode. Capture
+    * validation rejects any boundary value that is both read and written.
     */
   final case class Rebinding(
     local:  Map[HasId, HasId] = Map.empty,
@@ -60,110 +55,103 @@ private[cacheable] object CachePlan {
     private[cacheable] def id(id: HasId, access: Access): HasId = resolve(id, access)
   }
 
-  /** A synthetic-module port candidate inferred from the captured command closure. */
-  final case class PortCapture(
+  /** The complete reusable boundary contract for a cacheable region. */
+  final case class RegionInterface(
+    ports: Seq[PortBinding]
+  )
+
+  /** One synthetic port and the enclosing-module path it represents. */
+  final case class PortBinding(
     index:     Int,
-    capture:   Capture,
+    path:      CapturePath,
     direction: Access,
     gen:       Data
   ) {
     def name: String = s"cacheable_${index}_${direction.toString.toLowerCase}"
 
     def ioType: Data = direction match {
-      case Read  => Input(gen)
-      case Write => Output(gen)
+      case Read  => Input(gen.cloneTypeFull)
+      case Write => Output(gen.cloneTypeFull)
     }
   }
 
-  /** A reusable synthetic definition together with locators for its enclosing-module captures. */
-  private[cacheable] final case class CachedPlan(
-    plan:       CachePlan,
+  /** A reusable synthetic definition and its path-based enclosing-module interface. */
+  private[cacheable] final case class CachedRegion(
     definition: Definition[CachePlanModule],
-    ports:      Seq[CachedPort]
+    interface:  RegionInterface
   )
-
-  private[cacheable] final case class CachedPort(
-    name:       String,
-    direction:  Access,
-    rootIndex:  Int,
-    fieldIndex: Int,
-    gen:        Data
-  )
-
-  def ports(plan: CachePlan): Seq[PortCapture] = {
-    var index = 0
-    plan.captures.flatMap { capture =>
-      capture.data.toSeq.flatMap { data =>
-        capture.accesses.toSeq.sortBy(_.toString).map { direction =>
-          val result = PortCapture(index, capture, direction, data.cloneTypeFull)
-          index += 1
-          result
-        }
-      }
-    }
-  }
 
   /** Build the internal IO record used by a synthetic cache-plan module. */
-  private[cacheable] final class IORecord(specs: Seq[PortCapture]) extends Record {
-    override val elements: ListMap[String, Data] =
-      ListMap(specs.map(spec => spec.name -> spec.ioType): _*)
+  private[cacheable] final class IORecord(specs: Seq[PortBinding]) extends Record {
+    override val elements: VectorMap[String, Data] =
+      VectorMap.from(specs.iterator.map(spec => spec.name -> spec.ioType))
     override def cloneType: this.type =
       new IORecord(specs).asInstanceOf[this.type]
   }
 
   /** Create read/write rebinding maps for an instantiated [[IORecord]]. */
-  def portRebinding(plan: CachePlan, io: Record, local: Map[HasId, HasId]): Rebinding = {
-    val specs = ports(plan)
+  def portRebinding(
+    captured:  CapturedRegion,
+    interface: RegionInterface,
+    io:        Record,
+    local:     Map[HasId, HasId]
+  ): Rebinding = {
     // FlatIO returns a Record DataView.  Its elements must be reified to the actual module ports
     // before they are inserted into command IR, otherwise the copied commands refer to the view
     // root rather than a FIRRTL port.
-    val fields = specs.map { spec =>
-      val field = io.elements(spec.name)
-      spec -> reifySingleTarget(field).getOrElse(field)
-    }.toMap
+    require(
+      captured.captures.length == interface.ports.length,
+      "Cacheable region captures and interface ports must have the same length"
+    )
+    val reads = mutable.HashMap.empty[HasId, HasId]
+    val writes = mutable.HashMap.empty[HasId, HasId]
+    captured.captures.iterator.zip(interface.ports.iterator).foreach { case (capture, spec) =>
+      require(
+        capture.path == spec.path && capture.access == spec.direction,
+        s"Cacheable capture ${capture.path.value} does not match its synthetic port"
+      )
+      val rawField = io._elements(spec.name)
+      val field = reifySingleTarget(rawField).getOrElse(rawField)
+      capture.access match {
+        case Read  => reads += capture.id -> field
+        case Write => writes += capture.id -> field
+      }
+    }
     Rebinding(
       local = local,
-      reads = specs.collect { case spec @ PortCapture(_, capture, Read, _) => capture.id -> fields(spec) }.toMap,
-      writes = specs.collect { case spec @ PortCapture(_, capture, Write, _) => capture.id -> fields(spec) }.toMap
+      reads = reads.toMap,
+      writes = writes.toMap
     )
   }
 
-  /** Build the reusable synthetic definition for a cache-plan miss.
-    *
-    * Captures must be roots created before entering `cacheable()`.  This gives the hot path a
-    * stable, non-invasive locator without retaining an earlier module instance's hardware.
-    */
-  def cache(
-    plan:            CachePlan,
-    preCacheableIds: IndexedSeq[HasId]
-  )(implicit sourceInfo: SourceInfo): CachedPlan = {
-    val cachedPorts = ports(plan).map { spec =>
-      val rootAndField = preCacheableIds.zipWithIndex.view.flatMap {
-        case (data: Data, rootIndex) =>
-          getRecursiveFields.noPath(data).zipWithIndex.collectFirst {
-            case (field, fieldIndex) if field eq spec.capture.id => (rootIndex, fieldIndex)
-          }
-        case _ => None
-      }.headOption
-      require(
-        rootAndField.nonEmpty,
-        s"Cacheable capture ${spec.capture.id.getClass.getName} is not rooted in pre-cacheable module state"
-      )
-      val (rootIndex, fieldIndex) = rootAndField.get
-      CachedPort(spec.name, spec.direction, rootIndex, fieldIndex, spec.gen)
-    }
-    CachedPlan(plan, Definition(new CachePlanModule(plan)), cachedPorts)
+  /** Build the reusable synthetic definition for a cache miss. */
+  def cache(captured: CapturedRegion)(implicit sourceInfo: SourceInfo): CachedRegion = {
+    val interface = RegionInterface(
+      captured.captures.zipWithIndex.map { case (capture, index) =>
+        PortBinding(index, capture.path, capture.access, capture.id.cloneTypeFull)
+      }
+    )
+    CachedRegion(Definition(new CachePlanModule(captured, interface)), interface)
   }
 
   /** Instantiate a cached synthetic definition and connect it to this module's resolved captures.
-    *
-    * The definition does not retain source-module ids.  Each port capture is resolved from the
-    * current module's pre-cacheable ID sequence and checked before it is connected.
     */
   def instantiate(
-    cached:          CachedPlan,
-    preCacheableIds: IndexedSeq[HasId]
+    cached:    CachedRegion,
+    beforeIds: IndexedSeq[HasId]
   )(implicit sourceInfo: SourceInfo): Unit = {
+    val capturesByPath = capturePaths(beforeIds)
+    val resolvedPorts = cached.interface.ports.map { spec =>
+      val captured = capturesByPath.getOrElse(
+        spec.path,
+        throw new IllegalArgumentException(s"Cacheable capture path '${spec.path.value}' is absent from this module")
+      )
+      require(
+        DataMirror.checkTypeEquivalence(spec.gen, captured),
+        s"Cacheable capture '${spec.path.value}' has incompatible type in this module instance"
+      )
+      spec -> captured
+    }
     val instance = Instance(cached.definition)
     val instancePorts = instance.underlying match {
       case Clone(module: ModuleClone[_]) => module.getPorts
@@ -171,29 +159,8 @@ private[cacheable] object CachePlan {
         throw new IllegalStateException(s"Unexpected cache-plan instance representation: $other")
     }
 
-    cached.ports.foreach { spec =>
-      require(
-        spec.rootIndex < preCacheableIds.length,
-        s"Cacheable capture root index ${spec.rootIndex} is absent from this module instance"
-      )
-      val captured = preCacheableIds(spec.rootIndex) match {
-        case data: Data =>
-          val fields = getRecursiveFields.noPath(data)
-          require(
-            spec.fieldIndex < fields.length,
-            s"Cacheable capture field index ${spec.fieldIndex} is absent from this module instance"
-          )
-          fields(spec.fieldIndex)
-        case other =>
-          throw new IllegalArgumentException(
-            s"Cacheable capture root index ${spec.rootIndex} resolved to ${other.getClass.getName}, not Data"
-          )
-      }
-      require(
-        DataMirror.checkTypeEquivalence(spec.gen, captured),
-        s"Cacheable capture ${spec.name} has incompatible type in this module instance"
-      )
-      val instancePort = instancePorts.elements(spec.name)
+    resolvedPorts.foreach { case (spec, captured) =>
+      val instancePort = instancePorts._elements(spec.name)
       spec.direction match {
         case Read  => instancePort := captured
         case Write => captured := instancePort
@@ -202,68 +169,119 @@ private[cacheable] object CachePlan {
   }
 
   private[cacheable] final class CachePlanModule(
-    plan: CachePlan
+    captured:  CapturedRegion,
+    interface: RegionInterface
   )(implicit sourceInfo: SourceInfo)
       extends RawModule {
-    private val specs = ports(plan)
-    val io = FlatIO(new IORecord(specs))
+    val io = FlatIO(new IORecord(interface.ports))
 
-    private val local = plan.localIds.iterator.map { original =>
-      original -> cloneLocal(original)
+    private val local: Map[HasId, HasId] = captured.localIds.iterator.map { original =>
+      (original: HasId) -> (cloneLocal(original): HasId)
     }.toMap
-    private val rebinding = portRebinding(plan, io, local)
-    rebind(plan, rebinding).foreach(Builder.pushCommand)
+    private val rebinding = portRebinding(captured, interface, io, local)
+    rebind(captured, rebinding).foreach(Builder.pushCommand)
 
     override def desiredName: String = "CachePlanModule"
 
-    private def cloneLocal(original: HasId): HasId = original match {
-      case data: Data =>
-        val clone = data.cloneTypeFull
-        val binding = data.topBinding match {
-          case _: WireBinding           => WireBinding(this, Builder.currentBlock)
-          case _: RegBinding            => RegBinding(this, Builder.currentBlock)
-          case _: OpBinding             => OpBinding(this, Builder.currentBlock)
-          case _: MemoryPortBinding     => MemoryPortBinding(this, Builder.currentBlock)
-          case _: InstanceChoiceBinding => InstanceChoiceBinding(this, Builder.currentBlock)
-          case other =>
-            throw new UnsupportedOperationException(
-              s"Cannot rebind cache-plan local ${data.getClass.getName} with binding $other"
-            )
-        }
-        clone.bind(binding)
-        clone
-      case other =>
-        throw new UnsupportedOperationException(
-          s"Cannot rebind non-Data cache-plan local ${other.getClass.getName}"
-        )
+    private def cloneLocal(original: Data): Data = {
+      val clone = original.cloneTypeFull
+      val binding = original.topBinding match {
+        case _: WireBinding           => WireBinding(this, Builder.currentBlock)
+        case _: RegBinding            => RegBinding(this, Builder.currentBlock)
+        case _: OpBinding             => OpBinding(this, Builder.currentBlock)
+        case _: MemoryPortBinding     => MemoryPortBinding(this, Builder.currentBlock)
+        case _: InstanceChoiceBinding => InstanceChoiceBinding(this, Builder.currentBlock)
+        case other =>
+          throw new UnsupportedOperationException(
+            s"Cannot rebind local ${original.getClass.getName} with binding $other"
+          )
+      }
+      clone.bind(binding)
+      clone
     }
   }
 
-  def capture(beforeIds: Set[HasId], afterIds: Set[HasId], commands: Seq[ir.Command]): CachePlan = {
-    // Some command-defined ids (notably printf/verification statements) are not registered in
-    // Module._ids.  Collect definitions explicitly so they are treated as locals rather than
-    // synthetic IO captures.
-    val commandIds = mutable.HashSet.empty[HasId]
-    def collectDefinitions(command: ir.Command): Unit = command match {
-      case definition: ir.Definition => commandIds += definition.id
-      case ir.When(_, _, ifCommands, elseCommands) =>
-        ifCommands.foreach(collectDefinitions)
-        elseCommands.foreach(collectDefinitions)
-      case ir.LayerBlock(_, _, nested) => nested.foreach(collectDefinitions)
-      case contract: ir.DefContract =>
-        contract.ids.foreach(commandIds += _)
-        contract.region.getAllCommands().foreach(collectDefinitions)
-      case _: ir.FirrtlComment | _: ir.Placeholder =>
-      case _                                       =>
+  /** Resolve every pre-cacheable Data leaf to a stable relative structural path.
+    *
+    * A capture boundary is intentionally restricted to explicitly or automatically named roots.
+    * This avoids binding an unnamed temporary by elaboration order on a cache hit.
+    */
+  private def foreachCapturePath(beforeIds: IndexedSeq[HasId])(f: (CapturePath, Data) => Unit): Unit = {
+    val paths = mutable.LinkedHashMap.empty[CapturePath, Data]
+    val duplicates = mutable.LinkedHashSet.empty[String]
+    beforeIds.iterator.foreach {
+      case root: Data =>
+        root._computeName(None).filter(_.nonEmpty).foreach { rootName =>
+          getRecursiveFields.lazily(root, rootName).iterator.foreach { case (field, path) =>
+            val capturePath = CapturePath(path)
+            paths.get(capturePath).foreach { previous =>
+              if (previous != field) duplicates += path
+            }
+            paths.update(capturePath, field)
+            f(capturePath, field)
+          }
+        }
+      case _ =>
     }
-    commands.foreach(collectDefinitions)
+    require(
+      duplicates.isEmpty,
+      s"Cacheable boundary paths must be unique: ${duplicates.mkString(", ")}"
+    )
+  }
 
-    val localIds = (afterIds -- beforeIds) ++ commandIds
-    val accesses = new mutable.LinkedHashMap[HasId, mutable.Set[Access]]
+  private def capturePaths(beforeIds: IndexedSeq[HasId]): Map[CapturePath, Data] = {
+    val paths = mutable.LinkedHashMap.empty[CapturePath, Data]
+    foreachCapturePath(beforeIds) { (path, data) => paths.update(path, data) }
+    paths.toMap
+  }
+
+  private def capturePathsByData(
+    beforeIds:  IndexedSeq[HasId],
+    captured:   Set[Data]
+  ): Map[Data, CapturePath] = {
+    val paths = mutable.HashMap.empty[Data, CapturePath]
+    foreachCapturePath(beforeIds) { (path, data) =>
+      if (captured.contains(data)) paths.update(data, path)
+    }
+    paths.toMap
+  }
+
+  /** Capture a region after validating its restricted, Data-only closure. */
+  def capture(
+    beforeIds: IndexedSeq[HasId],
+    afterIds:  IndexedSeq[HasId],
+    commands:  Seq[ir.Command]
+  ): CapturedRegion = {
+    val locals = mutable.LinkedHashSet[Data]()
+
+    def addLocal(id: HasId): Unit = id match {
+      case data: Data => locals += data
+      case other =>
+        throw new IllegalArgumentException(
+          s"Cacheable regions only support Data local definitions; found ${other.getClass.getName}"
+        )
+    }
+
+    def isLocal(id: HasId): Boolean = id match {
+      case data: Data => locals.contains(data)
+      case _ => false
+    }
+
+    val beforeIdSet = beforeIds.toSet
+    afterIds.iterator.filterNot(beforeIdSet).foreach(addLocal)
+
+    val accesses = mutable.LinkedHashMap[HasId, Access]()
 
     def record(id: HasId, access: Access): Unit = {
-      if (!localIds.contains(id)) {
-        accesses.getOrElseUpdate(id, mutable.Set.empty) += access
+      if (!isLocal(id)) {
+        accesses.get(id) match {
+          case Some(previous) =>
+            require(
+              previous == access,
+              s"Cacheable capture ${id.getClass.getName} is both read and written; mixed access is unsupported"
+            )
+          case None => accesses += id -> access
+        }
       }
     }
 
@@ -284,37 +302,25 @@ private[cacheable] object CachePlan {
       case _                                  =>
     }
 
-    def recordPrintable(value: Printable, access: Access): Unit = {
-      // Name and FullName are resolved while elaborating the printable and do not become FIRRTL
-      // arguments.  Counting their backing Data here would create an unnecessary synthetic port.
-      Printable.unpackFirrtlArgs(value).foreach(data => record(data, access))
-    }
-
     def recordCommand(command: ir.Command): Unit = command match {
       case ir.DefPrim(_, id, _, args @ _*) =>
-        record(id, Write)
+        addLocal(id)
         args.foreach(recordArg(_, Read))
       case ir.DefInvalid(_, arg) => recordArg(arg, Write)
-      case ir.DefWire(_, id)     => record(id, Write)
+      case ir.DefWire(_, id)     => addLocal(id)
       case ir.DefReg(_, id, clock) =>
-        record(id, Write)
+        addLocal(id)
         recordArg(clock, Read)
       case ir.DefRegInit(_, id, clock, reset, init) =>
-        record(id, Write)
+        addLocal(id)
         recordArg(clock, Read)
         recordArg(reset, Read)
         recordArg(init, Read)
-      case ir.DefMemory(_, id, _, _)                   => record(id, Write)
-      case ir.DefSeqMemory(_, id, _, _, _)             => record(id, Write)
-      case ir.FirrtlMemory(_, id, _, _, _, _, _, _, _) => record(id, Write)
       case ir.DefMemPort(_, id, source, _, index, clock) =>
-        record(id, Write)
+        addLocal(id)
         recordArg(source, Read)
         recordArg(index, Read)
         recordArg(clock, Read)
-      case ir.DefInstance(_, id, _)             => record(id, Write)
-      case ir.DefInstanceChoice(_, id, _, _, _) => record(id, Write)
-      case ir.DefObject(_, id, _)               => record(id, Write)
       case ir.When(_, pred, ifCommands, elseCommands) =>
         recordArg(pred, Read)
         ifCommands.foreach(recordCommand)
@@ -327,21 +333,12 @@ private[cacheable] object CachePlan {
         recordArg(exp, Read)
       case ir.PropertyAssert(_, condition, _) => recordArg(condition, Read)
       case ir.Attach(_, locs)                 => locs.foreach(recordArg(_, Write))
-      case ir.Stop(id, _, clock, _) =>
-        record(id, Write)
-        recordArg(clock, Read)
-      case ir.LayerBlock(_, _, commands) => commands.foreach(recordCommand)
+      case ir.LayerBlock(_, _, commands)      => commands.foreach(recordCommand)
       case ir.DefContract(_, ids, exprs) =>
-        ids.foreach(record(_, Write))
+        ids.foreach(addLocal)
         exprs.foreach(recordArg(_, Read))
-      case ir.Printf(id, _, filename, clock, pable) =>
-        record(id, Write)
-        filename.foreach(recordPrintable(_, Read))
-        recordArg(clock, Read)
-        recordPrintable(pable, Read)
-      case ir.Flush(_, filename, clock) =>
-        filename.foreach(recordPrintable(_, Read))
-        recordArg(clock, Read)
+      case _: ir.Flush =>
+        throw new UnsupportedOperationException("Cacheable regions do not support flush statements")
       case ir.ProbeDefine(_, sink, probe) =>
         recordArg(sink, Write)
         recordArg(probe, Read)
@@ -363,19 +360,19 @@ private[cacheable] object CachePlan {
         recordArg(sink, Write)
         recordArg(source, Read)
       case ir.DomainInstance(_, id, _, properties) =>
-        record(id, Write)
+        addLocal(id)
         properties.foreach(recordArg(_, Read))
-      case ir.Verification(id, _, _, clock, predicate, pable) =>
-        record(id, Write)
-        recordArg(clock, Read)
-        recordArg(predicate, Read)
-        recordPrintable(pable, Read)
       case ir.DefIntrinsicExpr(_, _, id, args, _) =>
-        record(id, Write)
+        addLocal(id)
         args.foreach(recordArg(_, Read))
       case ir.DefIntrinsic(_, _, args, _) =>
         args.foreach(recordArg(_, Read))
       case _: ir.FirrtlComment | _: ir.Placeholder =>
+      case definition: ir.Definition =>
+        addLocal(definition.id)
+        throw new UnsupportedOperationException(
+          s"Unsupported command in cacheable region: ${definition.getClass.getName}"
+        )
       case other =>
         throw new UnsupportedOperationException(
           s"Unsupported command in cacheable region: ${other.getClass.getName}"
@@ -383,10 +380,28 @@ private[cacheable] object CachePlan {
     }
 
     commands.foreach(recordCommand)
-    CachePlan(
+    val capturedData = accesses.keysIterator.collect { case data: Data => data }.toSet
+    val pathsByData = capturePathsByData(beforeIds, capturedData)
+    val captures = accesses.iterator.map { case (id, access) =>
+      val data = id match {
+        case value: Data => value
+        case other =>
+          throw new IllegalArgumentException(
+            s"Cacheable regions only support Data captures; found ${other.getClass.getName}"
+          )
+      }
+      val path = pathsByData.getOrElse(
+        data,
+        throw new IllegalArgumentException(
+          s"Cacheable capture ${data.getClass.getName} is not rooted in named pre-cacheable module state"
+        )
+      )
+      Capture(data, access, path)
+    }.toSeq
+    CapturedRegion(
       commands,
-      localIds,
-      accesses.iterator.map { case (id, modes) => Capture(id, modes.toSet) }.toSeq
+      locals.toSeq,
+      captures
     )
   }
 
@@ -396,24 +411,22 @@ private[cacheable] object CachePlan {
     * caller is responsible for allocating fresh local IDs and synthetic IOs, then supplying all
     * mappings in `rebinding`.
     */
-  def rebind(plan: CachePlan, rebinding: Rebinding): Seq[ir.Command] = {
-    plan.localIds.foreach { value =>
+  def rebind(captured: CapturedRegion, rebinding: Rebinding): Seq[ir.Command] = {
+    captured.localIds.foreach { value =>
       require(
         rebinding.local.contains(value),
         s"Missing local rebinding for ${value.getClass.getName}"
       )
     }
-    plan.captures.foreach { capture =>
-      capture.accesses.foreach { access =>
-        val mapping = access match {
-          case Read  => rebinding.reads
-          case Write => rebinding.writes
-        }
-        require(
-          mapping.contains(capture.id) || rebinding.local.contains(capture.id),
-          s"Missing ${access.toString.toLowerCase} rebinding for ${capture.id.getClass.getName}"
-        )
+    captured.captures.foreach { capture =>
+      val mapping = capture.access match {
+        case Read  => rebinding.reads
+        case Write => rebinding.writes
       }
+      require(
+        mapping.contains(capture.id) || rebinding.local.contains(capture.id),
+        s"Missing ${capture.access.toString.toLowerCase} rebinding for ${capture.id.getClass.getName}"
+      )
     }
 
     def id(value: HasId, access: Access): HasId = rebinding.id(value, access)
@@ -434,18 +447,7 @@ private[cacheable] object CachePlan {
       case other => other
     }
 
-    def printable(value: Printable): Printable = value match {
-      case Printables(values) => Printables(values.map(printable))
-      case name:     Name     => name
-      case fullName: FullName => fullName
-      case other =>
-        val (format, values) = other.unpack
-        Printable.pack(format, values.map(data => id(data, Read).asInstanceOf[Data]): _*)
-    }
-
     def data(value: Data, access: Access): Data = id(value, access).asInstanceOf[Data]
-
-    def block(commands: Seq[ir.Command]): Seq[ir.Command] = commands.map(command)
 
     def command(value: ir.Command): ir.Command = value match {
       case ir.DefPrim(info, value, op, args @ _*) =>
@@ -458,22 +460,6 @@ private[cacheable] object CachePlan {
         ir.DefReg(info, data(value, Write), arg(clock, Read))
       case ir.DefRegInit(info, value, clock, reset, init) =>
         ir.DefRegInit(info, data(value, Write), arg(clock, Read), arg(reset, Read), arg(init, Read))
-      case ir.DefMemory(info, value, t, size) =>
-        ir.DefMemory(info, id(value, Write), t, size)
-      case ir.DefSeqMemory(info, value, t, size, readUnderWrite) =>
-        ir.DefSeqMemory(info, id(value, Write), t, size, readUnderWrite)
-      case ir.FirrtlMemory(info, value, t, size, readPorts, writePorts, readWritePorts, readLatency, writeLatency) =>
-        ir.FirrtlMemory(
-          info,
-          id(value, Write),
-          t,
-          size,
-          readPorts,
-          writePorts,
-          readWritePorts,
-          readLatency,
-          writeLatency
-        )
       case ir.DefMemPort(info, value, source, direction, index, clock) =>
         ir.DefMemPort(
           info,
@@ -483,17 +469,15 @@ private[cacheable] object CachePlan {
           arg(index, Read),
           arg(clock, Read)
         )
-      case ir.DefInstance(info, value, ports) =>
-        throw new UnsupportedOperationException("Nested module instances are not yet supported in CachePlan")
-      case ir.DefInstanceChoice(info, value, default, option, choices) =>
-        throw new UnsupportedOperationException("Module choices are not yet supported in CachePlan")
-      case ir.DefObject(info, value, className) =>
-        ir.DefObject(info, id(value, Write), className)
       case value: ir.When =>
         val result = new ir.When(value.sourceInfo, arg(value.pred, Read))
-        block(value.ifRegion.getAllCommands()).foreach(result.ifRegion.addCommand)
+        value.ifRegion.getAllCommands().foreach { nested =>
+          result.ifRegion.addCommand(command(nested))
+        }
         if (value.hasElse) {
-          block(value.elseRegion.getAllCommands()).foreach(result.elseRegion.addCommand)
+          value.elseRegion.getAllCommands().foreach { nested =>
+            result.elseRegion.addCommand(command(nested))
+          }
         }
         result
       case ir.Connect(info, loc, exp) =>
@@ -504,11 +488,11 @@ private[cacheable] object CachePlan {
         ir.PropertyAssert(info, arg(condition, Read), message)
       case ir.Attach(info, locs) =>
         ir.Attach(info, locs.map(value => arg(value, Write).asInstanceOf[ir.Node]))
-      case ir.Stop(value, info, clock, ret) =>
-        ir.Stop(id(value, Write).asInstanceOf[chisel3.stop.Stop], info, arg(clock, Read), ret)
       case value: ir.LayerBlock =>
         val result = new ir.LayerBlock(value.sourceInfo, value.layer)
-        block(value.region.getAllCommands()).foreach(result.region.addCommand)
+        value.region.getAllCommands().foreach { nested =>
+          result.region.addCommand(command(nested))
+        }
         result
       case value: ir.DefContract =>
         val result = ir.DefContract(
@@ -516,18 +500,10 @@ private[cacheable] object CachePlan {
           value.ids.map(data(_, Write)),
           value.exprs.map(arg(_, Read))
         )
-        block(value.region.getAllCommands()).foreach(result.region.addCommand)
+        value.region.getAllCommands().foreach { nested =>
+          result.region.addCommand(command(nested))
+        }
         result
-      case ir.Printf(value, info, filename, clock, pable) =>
-        ir.Printf(
-          id(value, Write).asInstanceOf[chisel3.printf.Printf],
-          info,
-          filename.map(printable),
-          arg(clock, Read),
-          printable(pable)
-        )
-      case ir.Flush(info, filename, clock) =>
-        ir.Flush(info, filename.map(printable), arg(clock, Read))
       case ir.ProbeDefine(info, sink, probe) =>
         ir.ProbeDefine(info, arg(sink, Write), arg(probe, Read))
       case ir.ProbeForceInitial(info, probe, value) =>
@@ -547,15 +523,6 @@ private[cacheable] object CachePlan {
           domain,
           properties.map(arg(_, Read))
         )
-      case ir.Verification(value, op, info, clock, predicate, pable) =>
-        ir.Verification(
-          id(value, Write).asInstanceOf[chisel3.VerificationStatement],
-          op,
-          info,
-          arg(clock, Read),
-          arg(predicate, Read),
-          printable(pable)
-        )
       case ir.DefIntrinsicExpr(info, intrinsic, value, args, params) =>
         ir.DefIntrinsicExpr(info, intrinsic, data(value, Write), args.map(arg(_, Read)), params)
       case ir.DefIntrinsic(info, intrinsic, args, params) =>
@@ -569,6 +536,6 @@ private[cacheable] object CachePlan {
         )
     }
 
-    plan.commands.map(command)
+    captured.commands.map(command)
   }
 }

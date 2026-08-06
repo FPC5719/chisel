@@ -2,13 +2,14 @@ package chisel3.experimental.cacheable
 
 import chisel3._
 import chisel3.experimental.SourceInfo
-import chisel3.experimental.dataview.reifySingleTarget
-import chisel3.experimental.hierarchy.ModuleClone
-import chisel3.experimental.hierarchy.core.{Clone, Definition, Instance}
+import chisel3.experimental.dataview._
+import chisel3.experimental.hierarchy._
+import chisel3.experimental.hierarchy.core.Clone
 import chisel3.internal.HasId
 import chisel3.internal.Builder
-import chisel3.internal.binding.{InstanceChoiceBinding, MemoryPortBinding, OpBinding, RegBinding, WireBinding}
+import chisel3.internal.binding._
 import chisel3.internal.firrtl.ir
+import chisel3.reflect.DataMirror
 
 import scala.collection.immutable.ListMap
 import scala.collection.mutable
@@ -60,7 +61,12 @@ private[cacheable] object CachePlan {
   }
 
   /** A synthetic-module port candidate inferred from the captured command closure. */
-  final case class PortCapture(index: Int, capture: Capture, direction: Access, gen: Data) {
+  final case class PortCapture(
+    index:     Int,
+    capture:   Capture,
+    direction: Access,
+    gen:       Data
+  ) {
     def name: String = s"cacheable_${index}_${direction.toString.toLowerCase}"
 
     def ioType: Data = direction match {
@@ -68,6 +74,21 @@ private[cacheable] object CachePlan {
       case Write => Output(gen)
     }
   }
+
+  /** A reusable synthetic definition together with locators for its enclosing-module captures. */
+  private[cacheable] final case class CachedPlan(
+    plan:       CachePlan,
+    definition: Definition[CachePlanModule],
+    ports:      Seq[CachedPort]
+  )
+
+  private[cacheable] final case class CachedPort(
+    name:       String,
+    direction:  Access,
+    rootIndex:  Int,
+    fieldIndex: Int,
+    gen:        Data
+  )
 
   def ports(plan: CachePlan): Seq[PortCapture] = {
     var index = 0
@@ -84,8 +105,10 @@ private[cacheable] object CachePlan {
 
   /** Build the internal IO record used by a synthetic cache-plan module. */
   private[cacheable] final class IORecord(specs: Seq[PortCapture]) extends Record {
-    override val elements:  ListMap[String, Data] = ListMap(specs.map(spec => spec.name -> spec.ioType): _*)
-    override def cloneType: this.type = new IORecord(specs).asInstanceOf[this.type]
+    override val elements: ListMap[String, Data] =
+      ListMap(specs.map(spec => spec.name -> spec.ioType): _*)
+    override def cloneType: this.type =
+      new IORecord(specs).asInstanceOf[this.type]
   }
 
   /** Create read/write rebinding maps for an instantiated [[IORecord]]. */
@@ -105,25 +128,72 @@ private[cacheable] object CachePlan {
     )
   }
 
-  /** Materialize a cache plan in a private module definition and connect one instance in the
-    * current module.
+  /** Build the reusable synthetic definition for a cache-plan miss.
     *
-    * The Definition/Instance hierarchy machinery handles the module boundary.  The only state
-    * copied manually is the captured command graph, after all prototype ids have been rebound to
-    * either synthetic-module ports or fresh local ids.
+    * Captures must be roots created before entering `cacheable()`.  This gives the hot path a
+    * stable, non-invasive locator without retaining an earlier module instance's hardware.
     */
-  def materialize(plan: CachePlan)(implicit sourceInfo: SourceInfo): Unit = {
-    val definition = Definition(new CachePlanModule(plan))
-    val instance = Instance(definition)
+  def cache(
+    plan:            CachePlan,
+    preCacheableIds: IndexedSeq[HasId]
+  )(implicit sourceInfo: SourceInfo): CachedPlan = {
+    val cachedPorts = ports(plan).map { spec =>
+      val rootAndField = preCacheableIds.zipWithIndex.view.flatMap {
+        case (data: Data, rootIndex) =>
+          getRecursiveFields.noPath(data).zipWithIndex.collectFirst {
+            case (field, fieldIndex) if field eq spec.capture.id => (rootIndex, fieldIndex)
+          }
+        case _ => None
+      }.headOption
+      require(
+        rootAndField.nonEmpty,
+        s"Cacheable capture ${spec.capture.id.getClass.getName} is not rooted in pre-cacheable module state"
+      )
+      val (rootIndex, fieldIndex) = rootAndField.get
+      CachedPort(spec.name, spec.direction, rootIndex, fieldIndex, spec.gen)
+    }
+    CachedPlan(plan, Definition(new CachePlanModule(plan)), cachedPorts)
+  }
+
+  /** Instantiate a cached synthetic definition and connect it to this module's resolved captures.
+    *
+    * The definition does not retain source-module ids.  Each port capture is resolved from the
+    * current module's pre-cacheable ID sequence and checked before it is connected.
+    */
+  def instantiate(
+    cached:          CachedPlan,
+    preCacheableIds: IndexedSeq[HasId]
+  )(implicit sourceInfo: SourceInfo): Unit = {
+    val instance = Instance(cached.definition)
     val instancePorts = instance.underlying match {
       case Clone(module: ModuleClone[_]) => module.getPorts
       case other =>
         throw new IllegalStateException(s"Unexpected cache-plan instance representation: $other")
     }
 
-    ports(plan).foreach { spec =>
+    cached.ports.foreach { spec =>
+      require(
+        spec.rootIndex < preCacheableIds.length,
+        s"Cacheable capture root index ${spec.rootIndex} is absent from this module instance"
+      )
+      val captured = preCacheableIds(spec.rootIndex) match {
+        case data: Data =>
+          val fields = getRecursiveFields.noPath(data)
+          require(
+            spec.fieldIndex < fields.length,
+            s"Cacheable capture field index ${spec.fieldIndex} is absent from this module instance"
+          )
+          fields(spec.fieldIndex)
+        case other =>
+          throw new IllegalArgumentException(
+            s"Cacheable capture root index ${spec.rootIndex} resolved to ${other.getClass.getName}, not Data"
+          )
+      }
+      require(
+        DataMirror.checkTypeEquivalence(spec.gen, captured),
+        s"Cacheable capture ${spec.name} has incompatible type in this module instance"
+      )
       val instancePort = instancePorts.elements(spec.name)
-      val captured = spec.capture.data.get
       spec.direction match {
         case Read  => instancePort := captured
         case Write => captured := instancePort
@@ -131,7 +201,10 @@ private[cacheable] object CachePlan {
     }
   }
 
-  private final class CachePlanModule(plan: CachePlan)(implicit sourceInfo: SourceInfo) extends RawModule {
+  private[cacheable] final class CachePlanModule(
+    plan: CachePlan
+  )(implicit sourceInfo: SourceInfo)
+      extends RawModule {
     private val specs = ports(plan)
     val io = FlatIO(new IORecord(specs))
 
@@ -275,7 +348,8 @@ private[cacheable] object CachePlan {
       case ir.ProbeForceInitial(_, probe, value) =>
         recordArg(probe, Write)
         recordArg(value, Read)
-      case ir.ProbeReleaseInitial(_, probe) => recordArg(probe, Write)
+      case ir.ProbeReleaseInitial(_, probe) =>
+        recordArg(probe, Write)
       case ir.ProbeForce(_, clock, cond, probe, value) =>
         recordArg(clock, Read)
         recordArg(cond, Read)
@@ -299,7 +373,8 @@ private[cacheable] object CachePlan {
       case ir.DefIntrinsicExpr(_, _, id, args, _) =>
         record(id, Write)
         args.foreach(recordArg(_, Read))
-      case ir.DefIntrinsic(_, _, args, _)          => args.foreach(recordArg(_, Read))
+      case ir.DefIntrinsic(_, _, args, _) =>
+        args.foreach(recordArg(_, Read))
       case _: ir.FirrtlComment | _: ir.Placeholder =>
       case other =>
         throw new UnsupportedOperationException(
@@ -375,12 +450,16 @@ private[cacheable] object CachePlan {
     def command(value: ir.Command): ir.Command = value match {
       case ir.DefPrim(info, value, op, args @ _*) =>
         ir.DefPrim(info, data(value, Write), op, args.map(arg(_, Read)): _*)
-      case ir.DefInvalid(info, value)    => ir.DefInvalid(info, arg(value, Write))
-      case ir.DefWire(info, value)       => ir.DefWire(info, data(value, Write))
-      case ir.DefReg(info, value, clock) => ir.DefReg(info, data(value, Write), arg(clock, Read))
+      case ir.DefInvalid(info, value) =>
+        ir.DefInvalid(info, arg(value, Write))
+      case ir.DefWire(info, value) =>
+        ir.DefWire(info, data(value, Write))
+      case ir.DefReg(info, value, clock) =>
+        ir.DefReg(info, data(value, Write), arg(clock, Read))
       case ir.DefRegInit(info, value, clock, reset, init) =>
         ir.DefRegInit(info, data(value, Write), arg(clock, Read), arg(reset, Read), arg(init, Read))
-      case ir.DefMemory(info, value, t, size) => ir.DefMemory(info, id(value, Write), t, size)
+      case ir.DefMemory(info, value, t, size) =>
+        ir.DefMemory(info, id(value, Write), t, size)
       case ir.DefSeqMemory(info, value, t, size, readUnderWrite) =>
         ir.DefSeqMemory(info, id(value, Write), t, size, readUnderWrite)
       case ir.FirrtlMemory(info, value, t, size, readPorts, writePorts, readWritePorts, readLatency, writeLatency) =>
@@ -408,7 +487,8 @@ private[cacheable] object CachePlan {
         throw new UnsupportedOperationException("Nested module instances are not yet supported in CachePlan")
       case ir.DefInstanceChoice(info, value, default, option, choices) =>
         throw new UnsupportedOperationException("Module choices are not yet supported in CachePlan")
-      case ir.DefObject(info, value, className) => ir.DefObject(info, id(value, Write), className)
+      case ir.DefObject(info, value, className) =>
+        ir.DefObject(info, id(value, Write), className)
       case value: ir.When =>
         val result = new ir.When(value.sourceInfo, arg(value.pred, Read))
         block(value.ifRegion.getAllCommands()).foreach(result.ifRegion.addCommand)
@@ -416,10 +496,14 @@ private[cacheable] object CachePlan {
           block(value.elseRegion.getAllCommands()).foreach(result.elseRegion.addCommand)
         }
         result
-      case ir.Connect(info, loc, exp)    => ir.Connect(info, arg(loc, Write), arg(exp, Read))
-      case ir.PropAssign(info, loc, exp) => ir.PropAssign(info, arg(loc, Write).asInstanceOf[ir.Node], arg(exp, Read))
-      case ir.PropertyAssert(info, condition, message) => ir.PropertyAssert(info, arg(condition, Read), message)
-      case ir.Attach(info, locs) => ir.Attach(info, locs.map(value => arg(value, Write).asInstanceOf[ir.Node]))
+      case ir.Connect(info, loc, exp) =>
+        ir.Connect(info, arg(loc, Write), arg(exp, Read))
+      case ir.PropAssign(info, loc, exp) =>
+        ir.PropAssign(info, arg(loc, Write).asInstanceOf[ir.Node], arg(exp, Read))
+      case ir.PropertyAssert(info, condition, message) =>
+        ir.PropertyAssert(info, arg(condition, Read), message)
+      case ir.Attach(info, locs) =>
+        ir.Attach(info, locs.map(value => arg(value, Write).asInstanceOf[ir.Node]))
       case ir.Stop(value, info, clock, ret) =>
         ir.Stop(id(value, Write).asInstanceOf[chisel3.stop.Stop], info, arg(clock, Read), ret)
       case value: ir.LayerBlock =>
@@ -442,15 +526,20 @@ private[cacheable] object CachePlan {
           arg(clock, Read),
           printable(pable)
         )
-      case ir.Flush(info, filename, clock)          => ir.Flush(info, filename.map(printable), arg(clock, Read))
-      case ir.ProbeDefine(info, sink, probe)        => ir.ProbeDefine(info, arg(sink, Write), arg(probe, Read))
-      case ir.ProbeForceInitial(info, probe, value) => ir.ProbeForceInitial(info, arg(probe, Write), arg(value, Read))
-      case ir.ProbeReleaseInitial(info, probe)      => ir.ProbeReleaseInitial(info, arg(probe, Write))
+      case ir.Flush(info, filename, clock) =>
+        ir.Flush(info, filename.map(printable), arg(clock, Read))
+      case ir.ProbeDefine(info, sink, probe) =>
+        ir.ProbeDefine(info, arg(sink, Write), arg(probe, Read))
+      case ir.ProbeForceInitial(info, probe, value) =>
+        ir.ProbeForceInitial(info, arg(probe, Write), arg(value, Read))
+      case ir.ProbeReleaseInitial(info, probe) =>
+        ir.ProbeReleaseInitial(info, arg(probe, Write))
       case ir.ProbeForce(info, clock, cond, probe, value) =>
         ir.ProbeForce(info, arg(clock, Read), arg(cond, Read), arg(probe, Write), arg(value, Read))
       case ir.ProbeRelease(info, clock, cond, probe) =>
         ir.ProbeRelease(info, arg(clock, Read), arg(cond, Read), arg(probe, Write))
-      case ir.DomainDefine(info, sink, source) => ir.DomainDefine(info, arg(sink, Write), arg(source, Read))
+      case ir.DomainDefine(info, sink, source) =>
+        ir.DomainDefine(info, arg(sink, Write), arg(source, Read))
       case ir.DomainInstance(info, value, domain, properties) =>
         ir.DomainInstance(
           info,

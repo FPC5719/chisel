@@ -12,6 +12,10 @@ import org.scalatest.matchers.should.Matchers
 
 class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
 
+  private object CacheCounter {
+    var cacheableRuns = 0
+  }
+
   private class EffectModule extends CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
@@ -98,6 +102,33 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
 
     child.io.in := io.in
     io.out := child.io.out
+  }
+
+  private class CachedTwiceModule extends CacheableModule {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+
+    def cacheable(): Unit = {
+      CacheCounter.cacheableRuns += 1
+      io.out := io.in + 1.U
+    }
+  }
+
+  private class CachedTwiceTop extends Module {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out0 = Output(UInt(8.W))
+      val out1 = Output(UInt(8.W))
+    })
+    val first = CacheableModule(new CachedTwiceModule)
+    val second = CacheableModule(new CachedTwiceModule)
+
+    first.io.in := io.in
+    second.io.in := io.in
+    io.out0 := first.io.out
+    io.out1 := second.io.out
   }
 
   private class InnerCacheableModule extends CacheableModule {
@@ -228,6 +259,19 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
 
   it should "lower the synthetic definition and instance" in {
     ChiselStage.emitSystemVerilog(new CacheableLocalTop) should include("module CachePlanModule")
+  }
+
+  it should "reuse one cacheable definition without rerunning cacheable" in {
+    CacheCounter.cacheableRuns = 0
+    ChiselStage
+      .emitCHIRRTL(new CachedTwiceTop)
+      .fileCheck()(
+        """|CHECK-LABEL: module CachedTwiceModule
+           |CHECK:       inst CachePlanModule of CachePlanModule
+           |CHECK:       inst CachePlanModule of CachePlanModule
+           |""".stripMargin
+      )
+    CacheCounter.cacheableRuns shouldBe 1
   }
 
   it should "restore the construction environment after a nested cacheable module" in {

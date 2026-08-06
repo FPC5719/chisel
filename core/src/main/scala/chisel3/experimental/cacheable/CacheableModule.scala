@@ -4,6 +4,7 @@ import chisel3._
 import chisel3.experimental.hierarchy._
 import chisel3.experimental.SourceInfo
 import chisel3.internal.Builder
+import chisel3.internal.BuilderContextCache
 import chisel3.internal.firrtl.ir
 
 abstract class CacheableModuleBase extends Module {
@@ -31,9 +32,12 @@ abstract class CacheableModuleBase extends Module {
 
   private val nonCacheableScope = new NonCacheable
 
-  private var _cachePlan: Option[CachePlan] = None
-
-  private[cacheable] final def cachePlan: Option[CachePlan] = _cachePlan
+  /** Cache discriminator for the synthetic cacheable definition.
+    *
+    * Override this when constructor parameters or external configuration alter `cacheable()`.
+    * Values must have stable `equals`/`hashCode` during one elaboration.
+    */
+  protected def cacheKey: Any = getClass
 
   protected final def nonCacheable[T](body: NonCacheable => T): T = {
     require(
@@ -48,25 +52,44 @@ abstract class CacheableModuleBase extends Module {
       currentEnv.cacheable,
       "cacheable() must be elaborated in a cacheable environment"
     )
-    val placeholder = new ir.Placeholder(sourceInfo)
-    val block = Builder.currentBlock.get
-    val beforeIds = _ids.toSet
-    val state = Builder.State.save
-    Builder.State.guard(state) {
-      block.appendToPlaceholder(placeholder) {
-        cacheable()
-      }
+    val preCacheableIds = _ids.toIndexedSeq
+    val shape = preCacheableIds.map {
+      case data: Data =>
+        data.typeName + ":" + getRecursiveFields.noPath(data).map(_.typeName).mkString("[")
+      case other => other.getClass.getName
     }
-    val (_, commands) = ir.Placeholder.unapply(placeholder).get
-    val plan = CachePlan.capture(beforeIds, _ids.toSet, commands)
-    _cachePlan = Some(plan)
-    CachePlan.materialize(plan)
+    val key = CacheableModuleBase.CacheKey(cacheKey, Module.currentModulePrefix, Builder.elideLayerBlocks, shape)
+    Builder.contextCache.get(key) match {
+      case Some(cached) =>
+        CachePlan.instantiate(cached, preCacheableIds)
+      case None =>
+        val placeholder = new ir.Placeholder(sourceInfo)
+        val block = Builder.currentBlock.get
+        val state = Builder.State.save
+        Builder.State.guard(state) {
+          block.appendToPlaceholder(placeholder) {
+            cacheable()
+          }
+        }
+        val (_, commands) = ir.Placeholder.unapply(placeholder).get
+        val plan = CachePlan.capture(preCacheableIds.toSet, _ids.toSet, commands)
+        val cached = CachePlan.cache(plan, preCacheableIds)
+        Builder.contextCache.put(key, cached)
+        CachePlan.instantiate(cached, preCacheableIds)
+    }
   }
 
   def cacheable(): Unit
 }
 
 object CacheableModuleBase {
+  private final case class CacheKey(
+    key:               Any,
+    modulePrefix:      String,
+    elideLayerBlocks:  Boolean,
+    preCacheableShape: Seq[String]
+  ) extends BuilderContextCache.Key[CachePlan.CachedPlan]
+
   private case class Env(cacheable: Boolean)
 
   private val envStack = new ThreadLocal[List[Env]] {

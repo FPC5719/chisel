@@ -76,6 +76,30 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     io.out := child.io.out
   }
 
+  private class CacheableLocalModule extends CacheableModule {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+
+    def cacheable(): Unit = {
+      val local = Wire(UInt(8.W))
+      local := io.in + 1.U
+      io.out := local
+    }
+  }
+
+  private class CacheableLocalTop extends Module {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+    val child = CacheableModule(new CacheableLocalModule)
+
+    child.io.in := io.in
+    io.out := child.io.out
+  }
+
   private class InnerCacheableModule extends CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
@@ -139,7 +163,9 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
            |CHECK:       add(io.in, UInt<1>(0h1))
            |CHECK:       xor({{.*}}, UInt<6>(0h3c))
            |CHECK:       connect effectResult, {{.*}}
-           |CHECK:       connect io.out, effectResult
+           |CHECK:       inst CachePlanModule of CachePlanModule
+           |CHECK:       connect io.out, CachePlanModule.cacheable_0_write
+           |CHECK:       connect CachePlanModule.cacheable_1_read, effectResult
            |""".stripMargin
       )
   }
@@ -167,8 +193,14 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     ChiselStage
       .emitCHIRRTL(new CacheablePassTop)
       .fileCheck()(
-        """|CHECK-LABEL: module CacheablePassModule
-           |CHECK:       connect io.out, io.in
+        """|CHECK-LABEL: module CachePlanModule
+           |CHECK:       input cacheable_1_read
+           |CHECK:       output cacheable_0_write
+           |CHECK:       connect cacheable_0_write, cacheable_1_read
+           |CHECK-LABEL: module CacheablePassModule
+           |CHECK:       inst CachePlanModule of CachePlanModule
+           |CHECK:       connect io.out, CachePlanModule.cacheable_0_write
+           |CHECK:       connect CachePlanModule.cacheable_1_read, io.in
            |CHECK-LABEL: module CacheablePassTop
            |CHECK:       inst child of CacheablePassModule
            |CHECK:       connect child.io.in, io.in
@@ -177,17 +209,42 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
       )
   }
 
+  it should "rebind locals into the synthetic definition" in {
+    ChiselStage
+      .emitCHIRRTL(new CacheableLocalTop)
+      .fileCheck()(
+        """|CHECK-LABEL: module CachePlanModule
+           |CHECK:       wire _WIRE
+           |CHECK:       add(cacheable_0_read, UInt<1>(0h1))
+           |CHECK:       connect _WIRE, {{.*}}
+           |CHECK:       connect cacheable_1_write, _WIRE
+           |CHECK-LABEL: module CacheableLocalModule
+           |CHECK:       inst CachePlanModule of CachePlanModule
+           |CHECK:       connect CachePlanModule.cacheable_0_read, io.in
+           |CHECK:       connect io.out, CachePlanModule.cacheable_1_write
+           |""".stripMargin
+      )
+  }
+
+  it should "lower the synthetic definition and instance" in {
+    ChiselStage.emitSystemVerilog(new CacheableLocalTop) should include("module CachePlanModule")
+  }
+
   it should "restore the construction environment after a nested cacheable module" in {
     ChiselStage
       .emitCHIRRTL(new NestedCacheableTop)
       .fileCheck()(
         """|CHECK-LABEL: module InnerCacheableModule
-           |CHECK:       connect io.out, io.in
+           |CHECK:       inst CachePlanModule of CachePlanModule
+           |CHECK:       connect io.out, CachePlanModule.cacheable_0_write
+           |CHECK:       connect CachePlanModule.cacheable_1_read, io.in
            |CHECK-LABEL: module OuterCacheableModule
            |CHECK:       inst inner of InnerCacheableModule
            |CHECK:       wire outerResult : UInt<8>
            |CHECK:       connect outerResult, inner.io.out
-           |CHECK:       connect io.out, outerResult
+           |CHECK:       inst CachePlanModule_1 of CachePlanModule_1
+           |CHECK:       connect io.out, CachePlanModule_1.cacheable_0_write
+           |CHECK:       connect CachePlanModule_1.cacheable_1_read, outerResult
            |""".stripMargin
       )
   }

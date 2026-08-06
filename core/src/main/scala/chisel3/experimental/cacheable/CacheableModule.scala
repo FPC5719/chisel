@@ -58,11 +58,9 @@ abstract class CacheableModuleBase extends Module {
       }
     }
     val (_, commands) = ir.Placeholder.unapply(placeholder).get
-    _cachePlan = Some(CachePlan.capture(beforeIds, _ids.toSet, commands))
-    // Keep the first implementation behaviorally complete until the synthetic-module materializer
-    // consumes this plan.  The placeholder is still detached while capture runs, so append it
-    // after analysis to retain the region in the enclosing module.
-    block.addCommand(placeholder)
+    val plan = CachePlan.capture(beforeIds, _ids.toSet, commands)
+    _cachePlan = Some(plan)
+    CachePlan.materialize(plan)
   }
 
   def cacheable(): Unit

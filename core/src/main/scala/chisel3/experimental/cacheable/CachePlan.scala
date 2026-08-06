@@ -1,7 +1,13 @@
 package chisel3.experimental.cacheable
 
 import chisel3._
+import chisel3.experimental.SourceInfo
+import chisel3.experimental.dataview.reifySingleTarget
+import chisel3.experimental.hierarchy.ModuleClone
+import chisel3.experimental.hierarchy.core.{Clone, Definition, Instance}
 import chisel3.internal.HasId
+import chisel3.internal.Builder
+import chisel3.internal.binding.{InstanceChoiceBinding, MemoryPortBinding, OpBinding, RegBinding, WireBinding}
 import chisel3.internal.firrtl.ir
 
 import scala.collection.immutable.ListMap
@@ -85,12 +91,79 @@ private[cacheable] object CachePlan {
   /** Create read/write rebinding maps for an instantiated [[IORecord]]. */
   def portRebinding(plan: CachePlan, io: Record, local: Map[HasId, HasId]): Rebinding = {
     val specs = ports(plan)
-    val fields = specs.map(spec => spec -> io.elements(spec.name)).toMap
+    // FlatIO returns a Record DataView.  Its elements must be reified to the actual module ports
+    // before they are inserted into command IR, otherwise the copied commands refer to the view
+    // root rather than a FIRRTL port.
+    val fields = specs.map { spec =>
+      val field = io.elements(spec.name)
+      spec -> reifySingleTarget(field).getOrElse(field)
+    }.toMap
     Rebinding(
       local = local,
       reads = specs.collect { case spec @ PortCapture(_, capture, Read, _) => capture.id -> fields(spec) }.toMap,
       writes = specs.collect { case spec @ PortCapture(_, capture, Write, _) => capture.id -> fields(spec) }.toMap
     )
+  }
+
+  /** Materialize a cache plan in a private module definition and connect one instance in the
+    * current module.
+    *
+    * The Definition/Instance hierarchy machinery handles the module boundary.  The only state
+    * copied manually is the captured command graph, after all prototype ids have been rebound to
+    * either synthetic-module ports or fresh local ids.
+    */
+  def materialize(plan: CachePlan)(implicit sourceInfo: SourceInfo): Unit = {
+    val definition = Definition(new CachePlanModule(plan))
+    val instance = Instance(definition)
+    val instancePorts = instance.underlying match {
+      case Clone(module: ModuleClone[_]) => module.getPorts
+      case other =>
+        throw new IllegalStateException(s"Unexpected cache-plan instance representation: $other")
+    }
+
+    ports(plan).foreach { spec =>
+      val instancePort = instancePorts.elements(spec.name)
+      val captured = spec.capture.data.get
+      spec.direction match {
+        case Read  => instancePort := captured
+        case Write => captured := instancePort
+      }
+    }
+  }
+
+  private final class CachePlanModule(plan: CachePlan)(implicit sourceInfo: SourceInfo) extends RawModule {
+    private val specs = ports(plan)
+    val io = FlatIO(new IORecord(specs))
+
+    private val local = plan.localIds.iterator.map { original =>
+      original -> cloneLocal(original)
+    }.toMap
+    private val rebinding = portRebinding(plan, io, local)
+    rebind(plan, rebinding).foreach(Builder.pushCommand)
+
+    override def desiredName: String = "CachePlanModule"
+
+    private def cloneLocal(original: HasId): HasId = original match {
+      case data: Data =>
+        val clone = data.cloneTypeFull
+        val binding = data.topBinding match {
+          case _: WireBinding           => WireBinding(this, Builder.currentBlock)
+          case _: RegBinding            => RegBinding(this, Builder.currentBlock)
+          case _: OpBinding             => OpBinding(this, Builder.currentBlock)
+          case _: MemoryPortBinding     => MemoryPortBinding(this, Builder.currentBlock)
+          case _: InstanceChoiceBinding => InstanceChoiceBinding(this, Builder.currentBlock)
+          case other =>
+            throw new UnsupportedOperationException(
+              s"Cannot rebind cache-plan local ${data.getClass.getName} with binding $other"
+            )
+        }
+        clone.bind(binding)
+        clone
+      case other =>
+        throw new UnsupportedOperationException(
+          s"Cannot rebind non-Data cache-plan local ${other.getClass.getName}"
+        )
+    }
   }
 
   def capture(beforeIds: Set[HasId], afterIds: Set[HasId], commands: Seq[ir.Command]): CachePlan = {

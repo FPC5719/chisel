@@ -3,11 +3,12 @@ package chisel3.experimental.cacheable
 import chisel3._
 import chisel3.experimental.hierarchy._
 import chisel3.experimental.SourceInfo
+import chisel3.experimental.BaseModule
 import chisel3.internal.Builder
 import chisel3.internal.BuilderContextCache
 import chisel3.internal.firrtl.ir
 
-abstract class CacheableModuleBase extends Module {
+trait CacheableModuleBase { self: Module =>
   import CacheableModuleBase.{currentEnv, CacheKey}
 
   protected object NonCacheable {
@@ -98,7 +99,9 @@ object CacheableModuleBase {
     finally envStack.set(old)
   }
 
-  private[cacheable] def instantiate[T <: CacheableModuleBase](bc: => T): T = Module {
+  private[cacheable] def instantiate[
+    T <: BaseModule with CacheableModuleBase
+  ](bc: => T): T = Module {
     inEnv(Env(cacheable = false)) {
       val module = bc
       inEnv(Env(cacheable = true)) {
@@ -109,9 +112,10 @@ object CacheableModuleBase {
   }
 }
 
-abstract class CacheableModule extends CacheableModuleBase
+trait CacheableModule extends CacheableModuleBase { self: Module => }
 
 object CacheableModule {
-  def apply[T <: CacheableModule](bc: => T): T =
-    CacheableModuleBase.instantiate(bc)
+  def apply[
+    T <: BaseModule with CacheableModule
+  ](bc: => T): T = CacheableModuleBase.instantiate(bc)
 }

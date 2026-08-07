@@ -25,7 +25,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     var cacheableRuns = 0
   }
 
-  private class EffectModule extends CacheableModule {
+  private class EffectModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
       val out = Output(UInt(8.W))
@@ -54,7 +54,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     }
   }
 
-  private class UnitEffectModule extends CacheableModule {
+  private class UnitEffectModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(Bool())
       val out = Output(Bool())
@@ -67,7 +67,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     def cacheable(): Unit = {}
   }
 
-  private class CacheablePassModule extends CacheableModule {
+  private class CacheablePassModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
       val out = Output(UInt(8.W))
@@ -89,7 +89,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     io.out := child.io.out
   }
 
-  private class CacheableLocalModule extends CacheableModule {
+  private class CacheableLocalModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
       val out = Output(UInt(8.W))
@@ -113,7 +113,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     io.out := child.io.out
   }
 
-  private class CachedTwiceModule extends CacheableModule {
+  private class CachedTwiceModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
       val out = Output(UInt(8.W))
@@ -140,7 +140,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     io.out1 := second.io.out
   }
 
-  private class FirstKeyModule extends CacheableModule {
+  private class FirstKeyModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
       val out = Output(UInt(8.W))
@@ -154,7 +154,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     }
   }
 
-  private class SecondKeyModule extends CacheableModule {
+  private class SecondKeyModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
       val out = Output(UInt(8.W))
@@ -183,7 +183,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     io.second := second.io.out
   }
 
-  private class PathBoundModule(addLeadingState: Boolean) extends CacheableModule {
+  private class PathBoundModule(addLeadingState: Boolean) extends Module with CacheableModule {
     if (addLeadingState) {
       val unrelated = Wire(UInt(8.W)).suggestName("unrelated")
       unrelated := 0.U
@@ -215,7 +215,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     io.out1 := second.io.out
   }
 
-  private class MixedCaptureModule extends CacheableModule {
+  private class MixedCaptureModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
       val out = Output(UInt(8.W))
@@ -236,7 +236,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     io.out := io.in
   }
 
-  private class NonDataLocalModule extends CacheableModule {
+  private class NonDataLocalModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
       val out = Output(UInt(8.W))
@@ -249,7 +249,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     }
   }
 
-  private class InnerCacheableModule extends CacheableModule {
+  private class InnerCacheableModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
       val out = Output(UInt(8.W))
@@ -260,7 +260,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     }
   }
 
-  private class OuterCacheableModule extends CacheableModule {
+  private class OuterCacheableModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
       val out = Output(UInt(8.W))
@@ -288,7 +288,7 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     io.out := child.io.out
   }
 
-  private class IllegalCacheableScopeModule extends CacheableModule {
+  private class IllegalCacheableScopeModule extends Module with CacheableModule {
     def cacheable(): Unit = {
       nonCacheable(_ => ())
     }

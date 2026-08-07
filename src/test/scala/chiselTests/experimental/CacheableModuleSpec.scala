@@ -25,6 +25,10 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     var cacheableRuns = 0
   }
 
+  private object DuplicateNoiseCounter {
+    var cacheableRuns = 0
+  }
+
   private class EffectModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
@@ -228,6 +232,67 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     }
   }
 
+  private class DuplicateNoiseModule(addDuplicateNoise: Boolean) extends Module with CacheableModule {
+    if (addDuplicateNoise) {
+      {
+        val shadow = Wire(UInt(8.W))
+        shadow := 0.U
+      }
+      {
+        val shadow = Wire(UInt(8.W))
+        shadow := 1.U
+      }
+    }
+
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+
+    def cacheable(): Unit = {
+      DuplicateNoiseCounter.cacheableRuns += 1
+      io.out := io.in
+    }
+  }
+
+  private class DuplicateNoiseTop extends Module {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out0 = Output(UInt(8.W))
+      val out1 = Output(UInt(8.W))
+    })
+    val first = CacheableModule(new DuplicateNoiseModule(addDuplicateNoise = false))
+    val second = CacheableModule(new DuplicateNoiseModule(addDuplicateNoise = true))
+
+    first.io.in := io.in
+    second.io.in := io.in
+    io.out0 := first.io.out
+    io.out1 := second.io.out
+  }
+
+  private class AmbiguousCapturedPathModule extends Module with CacheableModule {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+
+    private var captured: UInt = null
+
+    {
+      val state = Wire(UInt(8.W))
+      state := io.in
+      captured = state
+    }
+    {
+      val state = Wire(UInt(8.W))
+      state := 0.U
+    }
+
+    def cacheable(): Unit = {
+      io.out := captured
+    }
+  }
+
   private class PlainPassModule extends Module {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
@@ -406,6 +471,24 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     ChiselStage.emitCHIRRTL(new PathBoundTop)
 
     PathCounter.cacheableRuns shouldBe 1
+  }
+
+  it should "ignore duplicated provisional paths outside the captured boundary" in {
+    DuplicateNoiseCounter.cacheableRuns = 0
+    ChiselStage.emitCHIRRTL(new DuplicateNoiseTop)
+
+    DuplicateNoiseCounter.cacheableRuns shouldBe 1
+  }
+
+  it should "reject captures whose provisional path is ambiguous" in {
+    val error = the[IllegalArgumentException] thrownBy {
+      ChiselStage.emitCHIRRTL(new Module {
+        val child = CacheableModule(new AmbiguousCapturedPathModule)
+      })
+    }
+
+    error.getMessage should include("ambiguous pre-cacheable path")
+    error.getMessage should include("'state'")
   }
 
   it should "reject captures that are both read and written" in {

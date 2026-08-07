@@ -158,12 +158,15 @@ private[cacheable] object CachePlan {
     cached:    CachedRegion,
     beforeIds: IndexedSeq[HasId]
   )(implicit sourceInfo: SourceInfo): Unit = {
-    val capturesByPath = capturePaths(beforeIds)
+    val pathIndex = capturePathIndex(beforeIds)
     val resolvedPorts = cached.interface.ports.map { spec =>
-      val captured = capturesByPath.getOrElse(
-        spec.path,
-        throw new IllegalArgumentException(s"Cacheable capture path '${spec.path.value}' is absent from this module")
-      )
+      val captured = pathIndex.dataByPath.getOrElse(spec.path, Vector.empty) match {
+        case Vector(value) => value
+        case Vector() =>
+          throw new IllegalArgumentException(s"Cacheable capture path '${spec.path.value}' is absent from this module")
+        case _ =>
+          throw new IllegalArgumentException(s"Cacheable capture path '${spec.path.value}' is ambiguous in this module")
+      }
       require(
         DataMirror.checkTypeEquivalence(spec.gen, captured),
         s"Cacheable capture '${spec.path.value}' has incompatible type in this module instance"
@@ -227,43 +230,48 @@ private[cacheable] object CachePlan {
     * A capture boundary is intentionally restricted to explicitly or automatically named roots.
     * This avoids binding an unnamed temporary by elaboration order on a cache hit.
     */
+  private final case class CapturePathIndex(
+    pathsByData: Map[Data, Vector[CapturePath]],
+    dataByPath:  Map[CapturePath, Vector[Data]]
+  ) {
+    // Diagnostic text only needs one representative path per Data, so defer this extra pass
+    // until an error path actually asks for it.
+    lazy val describePaths: Map[Data, CapturePath] =
+      pathsByData.iterator.collect { case (data, paths) if paths.nonEmpty => data -> paths.head }.toMap
+
+    def resolveCapturedPath(data: Data): (Option[CapturePath], Boolean) = {
+      val candidatePaths = pathsByData.getOrElse(data, Vector.empty)
+      val path = candidatePaths
+        .find(candidate => dataByPath.getOrElse(candidate, Vector.empty).size == 1)
+        .orElse(candidatePaths.headOption)
+      val ambiguous = path.exists(candidate => dataByPath.getOrElse(candidate, Vector.empty).size != 1)
+      (path, ambiguous)
+    }
+  }
+
   private def foreachCapturePath(beforeIds: IndexedSeq[HasId])(f: (CapturePath, Data) => Unit): Unit = {
-    val paths = mutable.LinkedHashMap.empty[CapturePath, Data]
-    val duplicates = mutable.LinkedHashSet.empty[String]
     beforeIds.iterator.foreach {
       case root: Data =>
         root._computeName(None).filter(_.nonEmpty).foreach { rootName =>
           getRecursiveFields.lazily(root, rootName).iterator.foreach { case (field, path) =>
-            val capturePath = CapturePath(path)
-            paths.get(capturePath).foreach { previous =>
-              if (previous != field) duplicates += path
-            }
-            paths.update(capturePath, field)
-            f(capturePath, field)
+            f(CapturePath(path), field)
           }
         }
       case _ =>
     }
-    require(
-      duplicates.isEmpty,
-      s"Cacheable boundary paths must be unique: ${duplicates.mkString(", ")}"
-    )
   }
 
-  private def capturePaths(beforeIds: IndexedSeq[HasId]): Map[CapturePath, Data] = {
-    val paths = mutable.LinkedHashMap.empty[CapturePath, Data]
-    foreachCapturePath(beforeIds) { (path, data) => paths.update(path, data) }
-    paths.toMap
-  }
-
-  private def capturePathsByData(
-    beforeIds: IndexedSeq[HasId]
-  ): Map[Data, CapturePath] = {
-    val paths = mutable.HashMap.empty[Data, CapturePath]
+  private def capturePathIndex(beforeIds: IndexedSeq[HasId]): CapturePathIndex = {
+    val dataByPath = mutable.LinkedHashMap.empty[CapturePath, mutable.LinkedHashSet[Data]]
+    val pathsByData = mutable.LinkedHashMap.empty[Data, mutable.LinkedHashSet[CapturePath]]
     foreachCapturePath(beforeIds) { (path, data) =>
-      paths.update(data, path)
+      dataByPath.getOrElseUpdate(path, mutable.LinkedHashSet.empty) += data
+      pathsByData.getOrElseUpdate(data, mutable.LinkedHashSet.empty) += path
     }
-    paths.toMap
+    CapturePathIndex(
+      pathsByData.iterator.map { case (data, paths) => data -> paths.toVector }.toMap,
+      dataByPath.iterator.map { case (path, data) => path -> data.toVector }.toMap
+    )
   }
 
   /** Capture a region after validating its restricted, Data-only closure. */
@@ -288,7 +296,8 @@ private[cacheable] object CachePlan {
     }
     commands.foreach(indexDefinitionSource)
 
-    val pathsByData = capturePathsByData(beforeIds)
+    val pathIndex = capturePathIndex(beforeIds)
+    lazy val describePaths = pathIndex.describePaths
 
     def addLocal(id: HasId, info: SourceInfo): Unit = id match {
       case data: Data =>
@@ -321,7 +330,7 @@ private[cacheable] object CachePlan {
           case Some((previous, previousInfo)) =>
             require(
               previous == access,
-              s"Cacheable capture ${describeId(id, pathsByData)} is both ${previous.toString.toLowerCase}" +
+              s"Cacheable capture ${describeId(id, describePaths)} is both ${previous.toString.toLowerCase}" +
                 sourceLocation(previousInfo) + s" and ${access.toString.toLowerCase}" + sourceLocation(info) +
                 "; mixed access is unsupported"
             )
@@ -444,13 +453,20 @@ private[cacheable] object CachePlan {
             )
           )
       }
-      val path = pathsByData.getOrElse(
-        data,
+      val (pathOption, ambiguous) = pathIndex.resolveCapturedPath(data)
+      val path = pathOption.getOrElse {
         throw new IllegalArgumentException(
           withSourceInfo(
             s"Cacheable capture ${describeData(data)} is not rooted in named pre-cacheable module state",
             info
           )
+        )
+      }
+      require(
+        !ambiguous,
+        withSourceInfo(
+          s"Cacheable capture ${describeData(data, describePaths)} has ambiguous pre-cacheable path '${path.value}'",
+          info
         )
       )
       Capture(data, access, path, info)

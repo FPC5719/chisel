@@ -1,7 +1,7 @@
 package chisel3.experimental.cacheable
 
 import chisel3._
-import chisel3.experimental.SourceInfo
+import chisel3.experimental.{SourceInfo, UnlocatableSourceInfo}
 import chisel3.experimental.dataview._
 import chisel3.experimental.hierarchy._
 import chisel3.experimental.hierarchy.core.Clone
@@ -21,13 +21,14 @@ private[cacheable] object CachePlan {
 
   /** A temporary miss-path representation.  It intentionally refers to prototype IDs. */
   final case class CapturedRegion(
-    commands: Seq[ir.Command],
-    localIds: Seq[Data],
-    captures: Seq[Capture]
+    commands:        Seq[ir.Command],
+    localIds:        Seq[Data],
+    localSourceInfo: Map[Data, SourceInfo],
+    captures:        Seq[Capture]
   )
 
   /** A pre-cacheable Data reference and its only permitted access mode. */
-  final case class Capture(id: Data, access: Access, path: CapturePath)
+  final case class Capture(id: Data, access: Access, path: CapturePath, sourceInfo: SourceInfo)
 
   /** A stable relative path from a named pre-cacheable root to a Data leaf. */
   final case class CapturePath(value: String) {
@@ -73,6 +74,23 @@ private[cacheable] object CachePlan {
       case Read  => Input(gen.cloneTypeFull)
       case Write => Output(gen.cloneTypeFull)
     }
+  }
+
+  private def withSourceInfo(message: String, sourceInfo: SourceInfo): String =
+    message + sourceInfo.makeMessage(" " + _)
+
+  private def sourceLocation(sourceInfo: SourceInfo): String =
+    sourceInfo.makeMessage(" at " + _)
+
+  private def describeData(data: Data, paths: Map[Data, CapturePath] = Map.empty): String = {
+    val name = paths.get(data).map(_.value).getOrElse(data.earlyName)
+    s"'$name' (${data.typeName})"
+  }
+
+  private def describeId(id: HasId, paths: Map[Data, CapturePath] = Map.empty): String = id match {
+    case data: Data => describeData(data, paths)
+    case other =>
+      other._computeName(None).map(name => s"'$name' (${other.getClass.getName})").getOrElse(other.getClass.getName)
   }
 
   /** A reusable synthetic definition and its path-based enclosing-module interface. */
@@ -193,7 +211,10 @@ private[cacheable] object CachePlan {
         case _: InstanceChoiceBinding => InstanceChoiceBinding(this, Builder.currentBlock)
         case other =>
           throw new UnsupportedOperationException(
-            s"Cannot rebind local ${original.getClass.getName} with binding $other"
+            withSourceInfo(
+              s"Cannot rebind local ${describeData(original)} with binding $other",
+              captured.localSourceInfo.getOrElse(original, sourceInfo)
+            )
           )
       }
       clone.bind(binding)
@@ -236,12 +257,11 @@ private[cacheable] object CachePlan {
   }
 
   private def capturePathsByData(
-    beforeIds:  IndexedSeq[HasId],
-    captured:   Set[Data]
+    beforeIds: IndexedSeq[HasId]
   ): Map[Data, CapturePath] = {
     val paths = mutable.HashMap.empty[Data, CapturePath]
     foreachCapturePath(beforeIds) { (path, data) =>
-      if (captured.contains(data)) paths.update(data, path)
+      paths.update(data, path)
     }
     paths.toMap
   }
@@ -253,12 +273,33 @@ private[cacheable] object CachePlan {
     commands:  Seq[ir.Command]
   ): CapturedRegion = {
     val locals = mutable.LinkedHashSet[Data]()
+    val localSourceInfo = mutable.HashMap[Data, SourceInfo]()
 
-    def addLocal(id: HasId): Unit = id match {
-      case data: Data => locals += data
+    val definitionSourceInfo = mutable.HashMap[HasId, SourceInfo]()
+    def indexDefinitionSource(command: ir.Command): Unit = command match {
+      case definition: ir.Definition => definitionSourceInfo.getOrElseUpdate(definition.id, command.sourceInfo)
+      case ir.DefContract(_, ids, _) =>
+        ids.foreach { id => definitionSourceInfo.getOrElseUpdate(id, command.sourceInfo) }
+      case ir.When(_, _, ifCommands, elseCommands) =>
+        ifCommands.foreach(indexDefinitionSource)
+        elseCommands.foreach(indexDefinitionSource)
+      case ir.LayerBlock(_, _, nested) => nested.foreach(indexDefinitionSource)
+      case _                           =>
+    }
+    commands.foreach(indexDefinitionSource)
+
+    val pathsByData = capturePathsByData(beforeIds)
+
+    def addLocal(id: HasId, info: SourceInfo): Unit = id match {
+      case data: Data =>
+        locals += data
+        localSourceInfo.getOrElseUpdate(data, info)
       case other =>
         throw new IllegalArgumentException(
-          s"Cacheable regions only support Data local definitions; found ${other.getClass.getName}"
+          withSourceInfo(
+            s"Cacheable regions only support Data local definitions; found ${describeId(other)}",
+            info
+          )
         )
     }
 
@@ -268,139 +309,156 @@ private[cacheable] object CachePlan {
     }
 
     val beforeIdSet = beforeIds.toSet
-    afterIds.iterator.filterNot(beforeIdSet).foreach(addLocal)
+    afterIds.iterator.filterNot(beforeIdSet).foreach { id =>
+      addLocal(id, definitionSourceInfo.getOrElse(id, UnlocatableSourceInfo))
+    }
 
-    val accesses = mutable.LinkedHashMap[HasId, Access]()
+    val accesses = mutable.LinkedHashMap[HasId, (Access, SourceInfo)]()
 
-    def record(id: HasId, access: Access): Unit = {
+    def record(id: HasId, access: Access, info: SourceInfo): Unit = {
       if (!isLocal(id)) {
         accesses.get(id) match {
-          case Some(previous) =>
+          case Some((previous, previousInfo)) =>
             require(
               previous == access,
-              s"Cacheable capture ${id.getClass.getName} is both read and written; mixed access is unsupported"
+              s"Cacheable capture ${describeId(id, pathsByData)} is both ${previous.toString.toLowerCase}" +
+                sourceLocation(previousInfo) + s" and ${access.toString.toLowerCase}" + sourceLocation(info) +
+                "; mixed access is unsupported"
             )
-          case None => accesses += id -> access
+          case None => accesses += id -> (access -> info)
         }
       }
     }
 
-    def recordArg(arg: ir.Arg, access: Access): Unit = arg match {
-      case ir.Node(id)        => record(id, access)
-      case ir.Slot(imm, _)    => recordArg(imm, access)
-      case ir.OpaqueSlot(imm) => recordArg(imm, access)
+    def recordArg(arg: ir.Arg, access: Access, info: SourceInfo): Unit = arg match {
+      case ir.Node(id)        => record(id, access, info)
+      case ir.Slot(imm, _)    => recordArg(imm, access, info)
+      case ir.OpaqueSlot(imm) => recordArg(imm, access, info)
       case ir.Index(imm, value) =>
-        recordArg(imm, access)
-        recordArg(value, Read)
-      case ir.LitIndex(imm, _)                => recordArg(imm, access)
-      case ir.ProbeExpr(probe)                => recordArg(probe, access)
-      case ir.RWProbeExpr(probe)              => recordArg(probe, access)
-      case ir.ProbeRead(probe)                => recordArg(probe, access)
-      case ir.PrimExpr(_, args @ _*)          => args.foreach(recordArg(_, Read))
-      case ir.PropExpr(_, _, _, args)         => args.foreach(recordArg(_, Read))
-      case ir.DomainSubfield(_, domain, _, _) => recordArg(domain, Read)
+        recordArg(imm, access, info)
+        recordArg(value, Read, info)
+      case ir.LitIndex(imm, _)                => recordArg(imm, access, info)
+      case ir.ProbeExpr(probe)                => recordArg(probe, access, info)
+      case ir.RWProbeExpr(probe)              => recordArg(probe, access, info)
+      case ir.ProbeRead(probe)                => recordArg(probe, access, info)
+      case ir.PrimExpr(_, args @ _*)          => args.foreach(recordArg(_, Read, info))
+      case ir.PropExpr(_, _, _, args)         => args.foreach(recordArg(_, Read, info))
+      case ir.DomainSubfield(_, domain, _, _) => recordArg(domain, Read, info)
       case _                                  =>
     }
 
     def recordCommand(command: ir.Command): Unit = command match {
       case ir.DefPrim(_, id, _, args @ _*) =>
-        addLocal(id)
-        args.foreach(recordArg(_, Read))
-      case ir.DefInvalid(_, arg) => recordArg(arg, Write)
-      case ir.DefWire(_, id)     => addLocal(id)
+        addLocal(id, command.sourceInfo)
+        args.foreach(recordArg(_, Read, command.sourceInfo))
+      case ir.DefInvalid(_, arg) => recordArg(arg, Write, command.sourceInfo)
+      case ir.DefWire(_, id)     => addLocal(id, command.sourceInfo)
       case ir.DefReg(_, id, clock) =>
-        addLocal(id)
-        recordArg(clock, Read)
+        addLocal(id, command.sourceInfo)
+        recordArg(clock, Read, command.sourceInfo)
       case ir.DefRegInit(_, id, clock, reset, init) =>
-        addLocal(id)
-        recordArg(clock, Read)
-        recordArg(reset, Read)
-        recordArg(init, Read)
+        addLocal(id, command.sourceInfo)
+        recordArg(clock, Read, command.sourceInfo)
+        recordArg(reset, Read, command.sourceInfo)
+        recordArg(init, Read, command.sourceInfo)
       case ir.DefMemPort(_, id, source, _, index, clock) =>
-        addLocal(id)
-        recordArg(source, Read)
-        recordArg(index, Read)
-        recordArg(clock, Read)
+        addLocal(id, command.sourceInfo)
+        recordArg(source, Read, command.sourceInfo)
+        recordArg(index, Read, command.sourceInfo)
+        recordArg(clock, Read, command.sourceInfo)
       case ir.When(_, pred, ifCommands, elseCommands) =>
-        recordArg(pred, Read)
+        recordArg(pred, Read, command.sourceInfo)
         ifCommands.foreach(recordCommand)
         elseCommands.foreach(recordCommand)
       case ir.Connect(_, loc, exp) =>
-        recordArg(loc, Write)
-        recordArg(exp, Read)
+        recordArg(loc, Write, command.sourceInfo)
+        recordArg(exp, Read, command.sourceInfo)
       case ir.PropAssign(_, loc, exp) =>
-        recordArg(loc, Write)
-        recordArg(exp, Read)
-      case ir.PropertyAssert(_, condition, _) => recordArg(condition, Read)
-      case ir.Attach(_, locs)                 => locs.foreach(recordArg(_, Write))
+        recordArg(loc, Write, command.sourceInfo)
+        recordArg(exp, Read, command.sourceInfo)
+      case ir.PropertyAssert(_, condition, _) => recordArg(condition, Read, command.sourceInfo)
+      case ir.Attach(_, locs)                 => locs.foreach(recordArg(_, Write, command.sourceInfo))
       case ir.LayerBlock(_, _, commands)      => commands.foreach(recordCommand)
       case ir.DefContract(_, ids, exprs) =>
-        ids.foreach(addLocal)
-        exprs.foreach(recordArg(_, Read))
+        ids.foreach(addLocal(_, command.sourceInfo))
+        exprs.foreach(recordArg(_, Read, command.sourceInfo))
       case _: ir.Flush =>
-        throw new UnsupportedOperationException("Cacheable regions do not support flush statements")
+        throw new UnsupportedOperationException(
+          withSourceInfo("Cacheable regions do not support flush statements", command.sourceInfo)
+        )
       case ir.ProbeDefine(_, sink, probe) =>
-        recordArg(sink, Write)
-        recordArg(probe, Read)
+        recordArg(sink, Write, command.sourceInfo)
+        recordArg(probe, Read, command.sourceInfo)
       case ir.ProbeForceInitial(_, probe, value) =>
-        recordArg(probe, Write)
-        recordArg(value, Read)
+        recordArg(probe, Write, command.sourceInfo)
+        recordArg(value, Read, command.sourceInfo)
       case ir.ProbeReleaseInitial(_, probe) =>
-        recordArg(probe, Write)
+        recordArg(probe, Write, command.sourceInfo)
       case ir.ProbeForce(_, clock, cond, probe, value) =>
-        recordArg(clock, Read)
-        recordArg(cond, Read)
-        recordArg(probe, Write)
-        recordArg(value, Read)
+        recordArg(clock, Read, command.sourceInfo)
+        recordArg(cond, Read, command.sourceInfo)
+        recordArg(probe, Write, command.sourceInfo)
+        recordArg(value, Read, command.sourceInfo)
       case ir.ProbeRelease(_, clock, cond, probe) =>
-        recordArg(clock, Read)
-        recordArg(cond, Read)
-        recordArg(probe, Write)
+        recordArg(clock, Read, command.sourceInfo)
+        recordArg(cond, Read, command.sourceInfo)
+        recordArg(probe, Write, command.sourceInfo)
       case ir.DomainDefine(_, sink, source) =>
-        recordArg(sink, Write)
-        recordArg(source, Read)
+        recordArg(sink, Write, command.sourceInfo)
+        recordArg(source, Read, command.sourceInfo)
       case ir.DomainInstance(_, id, _, properties) =>
-        addLocal(id)
-        properties.foreach(recordArg(_, Read))
+        addLocal(id, command.sourceInfo)
+        properties.foreach(recordArg(_, Read, command.sourceInfo))
       case ir.DefIntrinsicExpr(_, _, id, args, _) =>
-        addLocal(id)
-        args.foreach(recordArg(_, Read))
+        addLocal(id, command.sourceInfo)
+        args.foreach(recordArg(_, Read, command.sourceInfo))
       case ir.DefIntrinsic(_, _, args, _) =>
-        args.foreach(recordArg(_, Read))
+        args.foreach(recordArg(_, Read, command.sourceInfo))
       case _: ir.FirrtlComment | _: ir.Placeholder =>
       case definition: ir.Definition =>
-        addLocal(definition.id)
+        addLocal(definition.id, command.sourceInfo)
         throw new UnsupportedOperationException(
-          s"Unsupported command in cacheable region: ${definition.getClass.getName}"
+          withSourceInfo(
+            s"Unsupported command in cacheable region: ${definition.getClass.getName}",
+            command.sourceInfo
+          )
         )
       case other =>
         throw new UnsupportedOperationException(
-          s"Unsupported command in cacheable region: ${other.getClass.getName}"
+          withSourceInfo(
+            s"Unsupported command in cacheable region: ${other.getClass.getName}",
+            other.sourceInfo
+          )
         )
     }
 
     commands.foreach(recordCommand)
-    val capturedData = accesses.keysIterator.collect { case data: Data => data }.toSet
-    val pathsByData = capturePathsByData(beforeIds, capturedData)
-    val captures = accesses.iterator.map { case (id, access) =>
+    val captures = accesses.iterator.map { case (id, (access, info)) =>
       val data = id match {
         case value: Data => value
         case other =>
           throw new IllegalArgumentException(
-            s"Cacheable regions only support Data captures; found ${other.getClass.getName}"
+            withSourceInfo(
+              s"Cacheable regions only support Data captures; found ${describeId(other)}",
+              info
+            )
           )
       }
       val path = pathsByData.getOrElse(
         data,
         throw new IllegalArgumentException(
-          s"Cacheable capture ${data.getClass.getName} is not rooted in named pre-cacheable module state"
+          withSourceInfo(
+            s"Cacheable capture ${describeData(data)} is not rooted in named pre-cacheable module state",
+            info
+          )
         )
       )
-      Capture(data, access, path)
+      Capture(data, access, path, info)
     }.toSeq
     CapturedRegion(
       commands,
       locals.toSeq,
+      localSourceInfo.toMap,
       captures
     )
   }
@@ -415,7 +473,10 @@ private[cacheable] object CachePlan {
     captured.localIds.foreach { value =>
       require(
         rebinding.local.contains(value),
-        s"Missing local rebinding for ${value.getClass.getName}"
+        withSourceInfo(
+          s"Missing local rebinding for ${describeData(value)}",
+          captured.localSourceInfo.getOrElse(value, UnlocatableSourceInfo)
+        )
       )
     }
     captured.captures.foreach { capture =>
@@ -425,7 +486,10 @@ private[cacheable] object CachePlan {
       }
       require(
         mapping.contains(capture.id) || rebinding.local.contains(capture.id),
-        s"Missing ${capture.access.toString.toLowerCase} rebinding for ${capture.id.getClass.getName}"
+        withSourceInfo(
+          s"Missing ${capture.access.toString.toLowerCase} rebinding for '${capture.path.value}'",
+          capture.sourceInfo
+        )
       )
     }
 
@@ -532,7 +596,10 @@ private[cacheable] object CachePlan {
         throw new UnsupportedOperationException("Cannot rebind a nested Placeholder")
       case other =>
         throw new UnsupportedOperationException(
-          s"Unsupported command in cacheable region: ${other.getClass.getName}"
+          withSourceInfo(
+            s"Unsupported command in cacheable region: ${other.getClass.getName}",
+            other.sourceInfo
+          )
         )
     }
 

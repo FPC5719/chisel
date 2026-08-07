@@ -415,7 +415,8 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
       })
     }
 
-    error.getMessage should include("both read and written")
+    error.getMessage should include("both write at")
+    error.getMessage should include("and read at")
   }
 
   it should "reject non-Data local definitions" in {

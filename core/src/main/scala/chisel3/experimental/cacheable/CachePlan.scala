@@ -1,7 +1,7 @@
 package chisel3.experimental.cacheable
 
 import chisel3._
-import chisel3.experimental.{SourceInfo, UnlocatableSourceInfo}
+import chisel3.experimental.{BaseModule, SourceInfo, UnlocatableSourceInfo}
 import chisel3.experimental.dataview._
 import chisel3.experimental.hierarchy._
 import chisel3.experimental.hierarchy.core.Clone
@@ -272,6 +272,14 @@ private[cacheable] object CachePlan {
         root._computeName(None).filter(_.nonEmpty).foreach { rootName =>
           getRecursiveFields.lazily(root, rootName).iterator.foreach { case (field, path) =>
             f(CapturePath(path), field)
+          }
+        }
+      case child: BaseModule =>
+        child._computeName(None).filter(_.nonEmpty).foreach { childName =>
+          child.getChiselPorts(UnlocatableSourceInfo).foreach { case (portName, port: Data) =>
+            getRecursiveFields.lazily(port, s"$childName.$portName").iterator.foreach { case (field, path) =>
+              f(CapturePath(path), field)
+            }
           }
         }
       case _ =>

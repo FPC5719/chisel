@@ -402,6 +402,27 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     io.out := io.in
   }
 
+  private class NonCacheableInnerModule extends Module {
+    val io = IO(new Bundle {
+      val foo = Output(UInt(8.W))
+    })
+    io.foo := 1.U
+  }
+
+  private class NonCacheableOuterModule extends Module with CacheableModule {
+    val io = IO(new Bundle {
+      val foo = Output(UInt(8.W))
+    })
+
+    private val inner = nonCacheable { _ =>
+      Module(new NonCacheableInnerModule)
+    }
+
+    def cacheable(): Unit = {
+      io.foo := inner.io.foo
+    }
+  }
+
   private class NonDataLocalModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
@@ -635,6 +656,21 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     }
 
     error.getMessage should include("only support Data local definitions")
+  }
+
+  it should "allow cacheable access to a child module IO from a non-cacheable scope" in {
+    ChiselStage
+      .emitCHIRRTL(new Module {
+        val child = CacheableModule(new NonCacheableOuterModule)
+      })
+      .fileCheck()(
+        """|CHECK-LABEL: module NonCacheableOuterModule
+           |CHECK:       inst inner of NonCacheableInnerModule
+           |CHECK:       inst CachePlanModule of CachePlanModule
+           |CHECK:       connect io.foo, CachePlanModule.cacheable_0_write
+           |CHECK:       connect CachePlanModule.cacheable_1_read, inner.io.foo
+           |""".stripMargin
+      )
   }
 
   it should "restore the construction environment after a nested cacheable module" in {

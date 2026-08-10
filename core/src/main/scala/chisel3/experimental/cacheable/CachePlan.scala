@@ -342,17 +342,20 @@ private[cacheable] object CachePlan {
     }
 
     val accesses = mutable.LinkedHashMap[HasId, (Access, SourceInfo)]()
+    val mixedAccessErrors = mutable.LinkedHashMap[HasId, String]()
 
     def record(id: HasId, access: Access, info: SourceInfo): Unit = {
       if (!isLocal(id)) {
         accesses.get(id) match {
           case Some((previous, previousInfo)) =>
-            require(
-              previous == access,
-              s"Cacheable capture ${describeId(id, describePaths)} is both ${previous.toString.toLowerCase}" +
-                sourceLocation(previousInfo) + s" and ${access.toString.toLowerCase}" + sourceLocation(info) +
-                "; mixed access is unsupported"
-            )
+            if (previous != access) {
+              mixedAccessErrors.getOrElseUpdate(
+                id,
+                s"Cacheable capture ${describeId(id, describePaths)} is both ${previous.toString.toLowerCase}" +
+                  sourceLocation(previousInfo) + s" and ${access.toString.toLowerCase}" + sourceLocation(info) +
+                  "; mixed access is unsupported"
+              )
+            }
           case None => accesses += id -> (access -> info)
         }
       }
@@ -461,6 +464,9 @@ private[cacheable] object CachePlan {
     }
 
     commands.foreach(recordCommand)
+    if (mixedAccessErrors.nonEmpty) {
+      throw new IllegalArgumentException(mixedAccessErrors.values.mkString("\n"))
+    }
     val captures = accesses.iterator.map { case (id, (access, info)) =>
       val data = id match {
         case value: Data => value

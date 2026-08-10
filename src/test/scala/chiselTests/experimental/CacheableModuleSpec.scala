@@ -318,6 +318,21 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     }
   }
 
+  private class MultipleMixedCaptureModule extends Module with CacheableModule {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+    private val stateA = Wire(UInt(8.W)).suggestName("stateA")
+    private val stateB = Wire(UInt(8.W)).suggestName("stateB")
+
+    def cacheable(): Unit = {
+      stateA := io.in
+      stateB := io.in + 1.U
+      io.out := stateA ^ stateB
+    }
+  }
+
   private class DuplicateNoiseModule(addDuplicateNoise: Boolean) extends Module with CacheableModule {
     if (addDuplicateNoise) {
       {
@@ -598,6 +613,18 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
 
     error.getMessage should include("both write at")
     error.getMessage should include("and read at")
+  }
+
+  it should "reject all captures that are both read and written at once" in {
+    val error = the[IllegalArgumentException] thrownBy {
+      ChiselStage.emitCHIRRTL(new Module {
+        val child = CacheableModule(new MultipleMixedCaptureModule)
+      })
+    }
+
+    error.getMessage should include("'stateA'")
+    error.getMessage should include("'stateB'")
+    error.getMessage.split("mixed access is unsupported", -1).length - 1 shouldBe 2
   }
 
   it should "reject non-Data local definitions" in {

@@ -196,13 +196,30 @@ private[cacheable] object CachePlan {
       extends RawModule {
     val io = FlatIO(new IORecord(interface.ports))
 
-    private val local: Map[HasId, HasId] = captured.localIds.iterator.map { original =>
-      (original: HasId) -> (cloneLocal(original): HasId)
-    }.toMap
+    private val local: Map[HasId, HasId] = captured.localIds.flatMap(cloneLocalTree).toMap
     private val rebinding = portRebinding(captured, interface, io, local)
     rebind(captured, rebinding).foreach(Builder.pushCommand)
 
     override def desiredName: String = "CachePlanModule"
+
+    private def cloneLocalTree(original: Data): Map[HasId, HasId] = {
+      val clone = cloneLocal(original)
+      val originalMembers = DataMirror.collectAllMembers(original)
+      val cloneMembers = DataMirror.collectAllMembers(clone)
+      require(
+        originalMembers.length == cloneMembers.length,
+        withSourceInfo(
+          s"Cannot rebind local ${describeData(original)} because its cloned structure changed",
+          captured.localSourceInfo.getOrElse(original, sourceInfo)
+        )
+      )
+      originalMembers
+        .zip(cloneMembers)
+        .map { case (originalMember, cloneMember) =>
+          (originalMember: HasId) -> (cloneMember: HasId)
+        }
+        .toMap
+    }
 
     private def cloneLocal(original: Data): Data = {
       val clone = original.cloneTypeFull
@@ -281,6 +298,7 @@ private[cacheable] object CachePlan {
     commands:  Seq[ir.Command]
   ): CapturedRegion = {
     val locals = mutable.LinkedHashSet[Data]()
+    val localMembers = mutable.LinkedHashSet[Data]()
     val localSourceInfo = mutable.HashMap[Data, SourceInfo]()
 
     val definitionSourceInfo = mutable.HashMap[HasId, SourceInfo]()
@@ -302,6 +320,7 @@ private[cacheable] object CachePlan {
     def addLocal(id: HasId, info: SourceInfo): Unit = id match {
       case data: Data =>
         locals += data
+        localMembers ++= DataMirror.collectAllMembers(data)
         localSourceInfo.getOrElseUpdate(data, info)
       case other =>
         throw new IllegalArgumentException(
@@ -313,7 +332,7 @@ private[cacheable] object CachePlan {
     }
 
     def isLocal(id: HasId): Boolean = id match {
-      case data: Data => locals.contains(data)
+      case data: Data => localMembers.contains(data)
       case _ => false
     }
 

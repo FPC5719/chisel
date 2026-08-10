@@ -117,6 +117,92 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     io.out := child.io.out
   }
 
+  private class LocalMixedAccessModule extends Module with CacheableModule {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+
+    def cacheable(): Unit = {
+      val local = Wire(UInt(8.W))
+      local := io.in
+      val snapshot = Wire(UInt(8.W))
+      snapshot := local
+      local := io.in + 1.U
+      io.out := snapshot ^ local
+    }
+  }
+
+  private class LocalMixedAccessTop extends Module {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+    val child = CacheableModule(new LocalMixedAccessModule)
+
+    child.io.in := io.in
+    io.out := child.io.out
+  }
+
+  private class LocalBundleMixedAccessModule extends Module with CacheableModule {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+
+    def cacheable(): Unit = {
+      val local = Wire(new Bundle {
+        val a = UInt(8.W)
+        val b = UInt(8.W)
+      })
+      local.a := io.in
+      val snapshot = Wire(UInt(8.W))
+      snapshot := local.a
+      local.a := io.in + 1.U
+      local.b := snapshot
+      io.out := local.a ^ local.b
+    }
+  }
+
+  private class LocalBundleMixedAccessTop extends Module {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+    val child = CacheableModule(new LocalBundleMixedAccessModule)
+
+    child.io.in := io.in
+    io.out := child.io.out
+  }
+
+  private class LocalVecMixedAccessModule extends Module with CacheableModule {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+
+    def cacheable(): Unit = {
+      val local = Wire(Vec(2, UInt(8.W)))
+      local(0) := io.in
+      val snapshot = Wire(UInt(8.W))
+      snapshot := local(0)
+      local(0) := io.in + 1.U
+      local(1) := snapshot
+      io.out := local(0) ^ local(1)
+    }
+  }
+
+  private class LocalVecMixedAccessTop extends Module {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val out = Output(UInt(8.W))
+    })
+    val child = CacheableModule(new LocalVecMixedAccessModule)
+
+    child.io.in := io.in
+    io.out := child.io.out
+  }
+
   private class CachedTwiceModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
@@ -438,6 +524,18 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
            |CHECK:       connect io.out, CachePlanModule.cacheable_1_write
            |""".stripMargin
       )
+  }
+
+  it should "allow mixed read and write access to cacheable local ids" in {
+    ChiselStage.emitCHIRRTL(new LocalMixedAccessTop) should include("module CachePlanModule")
+  }
+
+  it should "allow mixed read and write access to cacheable local Bundle fields" in {
+    ChiselStage.emitCHIRRTL(new LocalBundleMixedAccessTop) should include("module CachePlanModule")
+  }
+
+  it should "allow mixed read and write access to cacheable local Vec elements" in {
+    ChiselStage.emitCHIRRTL(new LocalVecMixedAccessTop) should include("module CachePlanModule")
   }
 
   it should "lower the synthetic definition and instance" in {

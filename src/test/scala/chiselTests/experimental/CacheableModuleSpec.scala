@@ -203,6 +203,47 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     io.out := child.io.out
   }
 
+  private class LocalNestedDynamicVecAccessModule extends Module with CacheableModule {
+    class FooElement extends Bundle {
+      val baz = UInt(8.W)
+      val other = UInt(8.W)
+    }
+
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val idx = Input(UInt(1.W))
+      val out = Output(UInt(8.W))
+    })
+
+    def cacheable(): Unit = {
+      val foo = Wire(new Bundle {
+        val vec = Vec(2, new FooElement)
+      })
+      val bar = Wire(new Bundle {
+        val idx = UInt(1.W)
+      })
+      foo.vec(0).baz := io.in
+      foo.vec(0).other := 0.U
+      foo.vec(1).baz := io.in + 1.U
+      foo.vec(1).other := 0.U
+      bar.idx := io.idx
+      io.out := foo.vec(bar.idx).baz
+    }
+  }
+
+  private class LocalNestedDynamicVecAccessTop extends Module {
+    val io = IO(new Bundle {
+      val in = Input(UInt(8.W))
+      val idx = Input(UInt(1.W))
+      val out = Output(UInt(8.W))
+    })
+    val child = CacheableModule(new LocalNestedDynamicVecAccessModule)
+
+    child.io.in := io.in
+    child.io.idx := io.idx
+    io.out := child.io.out
+  }
+
   private class CachedTwiceModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
@@ -423,6 +464,30 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     }
   }
 
+  private class NonCacheableVecInnerModule extends Module {
+    val io = IO(new Bundle {
+      val foo = Output(Vec(2, UInt(8.W)))
+    })
+
+    io.foo(0) := 1.U
+    io.foo(1) := 2.U
+  }
+
+  private class NonCacheableVecOuterModule extends Module with CacheableModule {
+    val io = IO(new Bundle {
+      val idx = Input(UInt(1.W))
+      val foo = Output(UInt(8.W))
+    })
+
+    private val inner = nonCacheable { _ =>
+      Module(new NonCacheableVecInnerModule)
+    }
+
+    def cacheable(): Unit = {
+      io.foo := inner.io.foo(io.idx)
+    }
+  }
+
   private class NonDataLocalModule extends Module with CacheableModule {
     val io = IO(new Bundle {
       val in = Input(UInt(8.W))
@@ -574,6 +639,10 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
     ChiselStage.emitCHIRRTL(new LocalVecMixedAccessTop) should include("module CachePlanModule")
   }
 
+  it should "allow cacheable access to a nested field of a local dynamic Vec index" in {
+    ChiselStage.emitCHIRRTL(new LocalNestedDynamicVecAccessTop) should include("module CachePlanModule")
+  }
+
   it should "lower the synthetic definition and instance" in {
     ChiselStage.emitSystemVerilog(new CacheableLocalTop) should include("module CachePlanModule")
   }
@@ -671,6 +740,17 @@ class CacheableModuleSpec extends AnyFlatSpec with Matchers with FileCheck {
            |CHECK:       connect CachePlanModule.cacheable_1_read, inner.io.foo
            |""".stripMargin
       )
+  }
+
+  it should "reject dynamic indexing of a non-cacheable Vec from cacheable code" in {
+    val error = the[UnsupportedOperationException] thrownBy {
+      ChiselStage.emitCHIRRTL(new Module {
+        val child = CacheableModule(new NonCacheableVecOuterModule)
+      })
+    }
+
+    error.getMessage should include("source Vec is not local")
+    error.getMessage should include("io.foo[io.idx]")
   }
 
   it should "restore the construction environment after a nested cacheable module" in {

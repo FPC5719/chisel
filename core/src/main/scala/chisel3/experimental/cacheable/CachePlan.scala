@@ -196,14 +196,30 @@ private[cacheable] object CachePlan {
       extends RawModule {
     val io = FlatIO(new IORecord(interface.ports))
 
-    private val local: Map[HasId, HasId] = captured.localIds.flatMap(cloneLocalTree).toMap
+    private val deferredLocalRefs = mutable.ArrayBuffer.empty[(Data, Data)]
+    private val local: Map[HasId, HasId] = {
+      val cloned = mutable.LinkedHashMap.empty[HasId, HasId]
+      captured.localIds.iterator.filterNot(isDynamicIndex).foreach(cloneLocalTree(_, cloned))
+      captured.localIds.iterator.filter(isDynamicIndex).foreach(cloneLocalTree(_, cloned))
+      cloned.toMap
+    }
     private val rebinding = portRebinding(captured, interface, io, local)
+    deferredLocalRefs.foreach { case (original, clone) =>
+      clone.setRef(rebindArg(original.getRef, rebinding, Read), force = true)
+    }
     rebind(captured, rebinding).foreach(Builder.pushCommand)
 
     override def desiredName: String = "CachePlanModule"
 
-    private def cloneLocalTree(original: Data): Map[HasId, HasId] = {
-      val clone = cloneLocal(original)
+    private def isDynamicIndex(data: Data): Boolean =
+      data.topBinding.isInstanceOf[DynamicIndexBinding]
+
+    private def cloneLocalTree(original: Data, cloned: mutable.LinkedHashMap[HasId, HasId]): Unit = {
+      if (cloned.contains(original)) {
+        return
+      }
+
+      val clone = cloneLocal(original, cloned)
       val originalMembers = DataMirror.collectAllMembers(original)
       val cloneMembers = DataMirror.collectAllMembers(clone)
       require(
@@ -215,13 +231,12 @@ private[cacheable] object CachePlan {
       )
       originalMembers.iterator
         .zip(cloneMembers.iterator)
-        .map { case (originalMember, cloneMember) =>
-          (originalMember: HasId) -> (cloneMember: HasId)
+        .foreach { case (originalMember, cloneMember) =>
+          cloned += (originalMember: HasId) -> (cloneMember: HasId)
         }
-        .toMap
     }
 
-    private def cloneLocal(original: Data): Data = {
+    private def cloneLocal(original: Data, cloned: collection.Map[HasId, HasId]): Data = {
       val clone = original.cloneTypeFull
       val binding = original.topBinding match {
         case _: WireBinding           => WireBinding(this, Builder.currentBlock)
@@ -229,6 +244,18 @@ private[cacheable] object CachePlan {
         case _: OpBinding             => OpBinding(this, Builder.currentBlock)
         case _: MemoryPortBinding     => MemoryPortBinding(this, Builder.currentBlock)
         case _: InstanceChoiceBinding => InstanceChoiceBinding(this, Builder.currentBlock)
+        case DynamicIndexBinding(vec) =>
+          val clonedVec = cloned.get(vec).collect { case value: Vec[_] => value }.getOrElse {
+            throw new UnsupportedOperationException(
+              withSourceInfo(
+                s"Cannot rebind local dynamic index ${describeData(original)} because its source Vec is not local",
+                captured.localSourceInfo.getOrElse(original, sourceInfo)
+              )
+            )
+          }
+          deferredLocalRefs += original -> clone
+          DynamicIndexBinding(clonedVec)
+        case _: DontCareBinding       => DontCareBinding()
         case other =>
           throw new UnsupportedOperationException(
             withSourceInfo(
@@ -356,18 +383,32 @@ private[cacheable] object CachePlan {
     guardError()
 
     val accesses = mutable.LinkedHashMap[HasId, (Access, SourceInfo)]()
+    val recordingDynamicLocalRefs = mutable.HashSet.empty[Data]
+
+    def recordDynamicLocalRef(data: Data, access: Access)(implicit sourceInfo: SourceInfo): Unit = {
+      if (data.topBinding.isInstanceOf[DynamicIndexBinding] && recordingDynamicLocalRefs.add(data)) {
+        try {
+          data.getOptionRef.foreach(recordArg(_, access))
+        } finally {
+          recordingDynamicLocalRefs -= data
+        }
+      }
+    }
 
     def record(id: HasId, access: Access)(implicit sourceInfo: SourceInfo): Unit = {
-      if (!isLocal(id)) {
-        accesses.get(id) match {
-          case Some((previous, previousInfo)) =>
-            if (previous != access) {
-              errors += (s"Cacheable capture ${describeId(id, describePaths)} is both ${previous.toString.toLowerCase}" +
-                sourceLocation(previousInfo) + s" and ${access.toString.toLowerCase}" + sourceLocation(sourceInfo) +
-                "; mixed access is unsupported")
-            }
-          case None => accesses += id -> (access -> sourceInfo)
-        }
+      id match {
+        case data: Data if isLocal(data) =>
+          recordDynamicLocalRef(data, access)
+        case _ =>
+          accesses.get(id) match {
+            case Some((previous, previousInfo)) =>
+              if (previous != access) {
+                errors += (s"Cacheable capture ${describeId(id, describePaths)} is both ${previous.toString.toLowerCase}" +
+                  sourceLocation(previousInfo) + s" and ${access.toString.toLowerCase}" + sourceLocation(sourceInfo) +
+                  "; mixed access is unsupported")
+              }
+            case None => accesses += id -> (access -> sourceInfo)
+          }
       }
     }
 
@@ -512,6 +553,25 @@ private[cacheable] object CachePlan {
     )
   }
 
+  private def rebindId(value: HasId, rebinding: Rebinding, access: Access): HasId =
+    rebinding.id(value, access)
+
+  private def rebindArg(value: ir.Arg, rebinding: Rebinding, access: Access): ir.Arg = value match {
+    case ir.Node(value)                   => ir.Node(rebindId(value, rebinding, access))
+    case ir.Slot(imm, name)               => ir.Slot(rebindArg(imm, rebinding, access), name)
+    case ir.OpaqueSlot(imm)               => ir.OpaqueSlot(rebindArg(imm, rebinding, access).asInstanceOf[ir.Node])
+    case ir.Index(imm, index)             => ir.Index(rebindArg(imm, rebinding, access), rebindArg(index, rebinding, Read))
+    case ir.LitIndex(imm, index)          => ir.LitIndex(rebindArg(imm, rebinding, access), index)
+    case ir.ProbeExpr(probe)              => ir.ProbeExpr(rebindArg(probe, rebinding, access))
+    case ir.RWProbeExpr(probe)            => ir.RWProbeExpr(rebindArg(probe, rebinding, access))
+    case ir.ProbeRead(probe)              => ir.ProbeRead(rebindArg(probe, rebinding, access))
+    case ir.PrimExpr(op, args @ _*)       => ir.PrimExpr(op, args.map(rebindArg(_, rebinding, Read)): _*)
+    case ir.PropExpr(info, tpe, op, args) => ir.PropExpr(info, tpe, op, args.map(rebindArg(_, rebinding, Read)))
+    case ir.DomainSubfield(info, domain, fieldName, fieldType) =>
+      ir.DomainSubfield(info, rebindArg(domain, rebinding, Read), fieldName, fieldType)
+    case other => other
+  }
+
   /** Rebind a captured command region to fresh IDs.
     *
     * This copies the Chisel IR command objects; it does not mutate the prototype commands.  The
@@ -542,23 +602,9 @@ private[cacheable] object CachePlan {
       )
     }
 
-    def id(value: HasId, access: Access): HasId = rebinding.id(value, access)
+    def id(value: HasId, access: Access): HasId = rebindId(value, rebinding, access)
 
-    def arg(value: ir.Arg, access: Access): ir.Arg = value match {
-      case ir.Node(value)                   => ir.Node(id(value, access))
-      case ir.Slot(imm, name)               => ir.Slot(arg(imm, access), name)
-      case ir.OpaqueSlot(imm)               => ir.OpaqueSlot(arg(imm, access).asInstanceOf[ir.Node])
-      case ir.Index(imm, index)             => ir.Index(arg(imm, access), arg(index, Read))
-      case ir.LitIndex(imm, index)          => ir.LitIndex(arg(imm, access), index)
-      case ir.ProbeExpr(probe)              => ir.ProbeExpr(arg(probe, access))
-      case ir.RWProbeExpr(probe)            => ir.RWProbeExpr(arg(probe, access))
-      case ir.ProbeRead(probe)              => ir.ProbeRead(arg(probe, access))
-      case ir.PrimExpr(op, args @ _*)       => ir.PrimExpr(op, args.map(arg(_, Read)): _*)
-      case ir.PropExpr(info, tpe, op, args) => ir.PropExpr(info, tpe, op, args.map(arg(_, Read)))
-      case ir.DomainSubfield(info, domain, fieldName, fieldType) =>
-        ir.DomainSubfield(info, arg(domain, Read), fieldName, fieldType)
-      case other => other
-    }
+    def arg(value: ir.Arg, access: Access): ir.Arg = rebindArg(value, rebinding, access)
 
     def data(value: Data, access: Access): Data = id(value, access).asInstanceOf[Data]
 

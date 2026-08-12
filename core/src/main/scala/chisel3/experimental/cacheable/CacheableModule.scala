@@ -20,7 +20,13 @@ trait CacheableModuleBase { self: Module =>
       eff.evaluate()
     }
 
-    def unwrap[T <: Data](eff: SideEffect[T], gen: T, name: String): T = {
+    def unwrap[T <: Data](
+      eff: SideEffect[T],
+      gen: T,
+      name: String
+    )(implicit
+      sourceInfo: SourceInfo
+    ): T = {
       require(
         !currentEnv.cacheable,
         "Must not unwrap in a cacheable environment"
@@ -101,7 +107,7 @@ object CacheableModuleBase {
 
   private[cacheable] def instantiate[
     T <: BaseModule with CacheableModuleBase
-  ](bc: => T): T = Module {
+  ](bc: => T)(implicit sourceInfo: SourceInfo): T = Module {
     inEnv(Env(cacheable = false)) {
       val module = bc
       inEnv(Env(cacheable = true)) {
@@ -117,5 +123,6 @@ trait CacheableModule extends CacheableModuleBase { self: Module => }
 object CacheableModule {
   def apply[
     T <: BaseModule with CacheableModule
-  ](bc: => T): T = CacheableModuleBase.instantiate(bc)
+  ](bc: => T)(implicit sourceInfo: SourceInfo): T =
+    CacheableModuleBase.instantiate(bc)
 }

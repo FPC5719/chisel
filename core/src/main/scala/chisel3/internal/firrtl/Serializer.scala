@@ -283,6 +283,8 @@ private[chisel3] object Serializer {
       b ++= "invalidate "; serialize(arg, ctx, info); serialize(info)
     case e @ DefInstance(info, id, _) =>
       b ++= "inst "; b ++= legalize(e.name); b ++= " of "; b ++= legalize(id.name); serialize(e.sourceInfo)
+    case e @ DefInstanceFrom(info, id, _, from) =>
+      b ++= "inst "; b ++= legalize(e.name); b ++= " of "; b ++= legalize(from.name); serialize(e.sourceInfo)
     case e @ DefInstanceChoice(info, _, default, option, choices) =>
       b ++= "instchoice "; b ++= legalize(e.name); b ++= " of "; b ++= legalize(default.name);
       b ++= ", "; b ++= legalize(option); b ++= " : "; serialize(e.sourceInfo)

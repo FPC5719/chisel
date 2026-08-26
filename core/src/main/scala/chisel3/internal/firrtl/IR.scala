@@ -361,6 +361,8 @@ private[chisel3] object ir {
   ) extends Definition
 
   case class DefInstance(sourceInfo: SourceInfo, id: BaseModule, ports: Seq[Port]) extends Definition
+  case class DefInstanceFrom(sourceInfo: SourceInfo, id: BaseModule, ports: Seq[Port], from: BaseModule)
+      extends Definition
   case class DefInstanceChoice(
     sourceInfo: SourceInfo,
     id:         HasId,

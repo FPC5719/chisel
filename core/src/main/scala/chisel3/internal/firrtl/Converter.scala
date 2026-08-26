@@ -200,6 +200,8 @@ private[chisel3] object Converter {
       fir.IsInvalid(convert(info), convert(arg, ctx, info))
     case e @ DefInstance(info, id, _) =>
       fir.DefInstance(convert(info), e.name, id.name)
+    case e @ DefInstanceFrom(info, id, _, from) => // Workaround for compile, the converter should not be used
+      fir.DefInstance(convert(info), e.name, id.name)
     case e @ DefInstanceChoice(info, _, default, option, choices) =>
       fir.DefInstanceChoice(
         convert(info),

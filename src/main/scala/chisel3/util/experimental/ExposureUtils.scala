@@ -6,8 +6,8 @@ import chisel3.internal.{throwException, Builder}
 import scala.reflect.ClassTag
 
 object ExposureUtils {
-  def expose(tag: ExposureTag, x: Data)(implicit sourceInfo: SourceInfo): Unit = {
-    Builder.currentModule.get.expose(tag, x)
+  def expose(tag: ExposureTag, isUpward: Boolean, x: Data)(implicit sourceInfo: SourceInfo): Unit = {
+    Builder.currentModule.get.expose(tag, isUpward, x)
   }
 
   def collect[T <: ExposureTag: ClassTag](): Seq[(T, Data)] = {

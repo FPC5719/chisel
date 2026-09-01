@@ -1120,14 +1120,14 @@ package experimental {
     private[chisel3] val exposureNamespace: Namespace = Namespace.empty
     private[chisel3] val exposures:         ArrayBuffer[ModuleExposure] = ArrayBuffer.empty
 
-    private[chisel3] def expose(tag: ExposureTag, x: Data)(implicit sourceInfo: SourceInfo): Unit = {
-      exposures += ModuleExposure.Real(tag, x, sourceInfo)
+    private[chisel3] def expose(tag: ExposureTag, isUpward: Boolean, x: Data)(implicit sourceInfo: SourceInfo): Unit = {
+      exposures += ModuleExposure.Real(tag, isUpward, x, sourceInfo)
     }
 
     private[chisel3] def propagateExposure(): Unit = {
       Builder.currentModule.map { module =>
         exposures.foreach { item =>
-          module.expose(item.tag, item.port)(item.sourceInfo)
+          module.expose(item.tag, item.isUpward, item.port)(item.sourceInfo)
         }
       }
     }
@@ -1136,13 +1136,22 @@ package experimental {
       exposures.foreach { item =>
         implicit val sourceInfo: SourceInfo = item.sourceInfo
         item match {
-          case ModuleExposure.Real(_, data, _) =>
+          case ModuleExposure.Real(_, isUpward, data, _) =>
             val seed = exposureNamespace.name(s"x_${data.earlyName}")
-            item.port = IO(Output(chiselTypeOf(data))).suggestName(seed)
-            item.port := data
-          case ModuleExposure.Cached(_, datatype, earlyName, _) =>
+            if (isUpward) {
+              item.port = IO(Output(chiselTypeOf(data))).suggestName(seed)
+              item.port := data
+            } else {
+              item.port = IO(Input(chiselTypeOf(data))).suggestName(seed)
+              data := item.port
+            }
+          case ModuleExposure.Cached(_, isUpward, datatype, earlyName, _) =>
             val seed = exposureNamespace.name(s"x_${earlyName}")
-            item.port = IO(Output(datatype)).suggestName(seed)
+            if (isUpward) {
+              item.port = IO(Output(datatype)).suggestName(seed)
+            } else {
+              item.port = IO(Input(datatype)).suggestName(seed)
+            }
         }
       }
     }
@@ -1154,6 +1163,7 @@ trait ExposureTag
 
 private[chisel3] sealed trait ModuleExposure {
   val tag:        ExposureTag
+  val isUpward:   Boolean
   val sourceInfo: SourceInfo
   var port: Data = null
 }
@@ -1161,12 +1171,14 @@ private[chisel3] sealed trait ModuleExposure {
 private[chisel3] object ModuleExposure {
   final case class Real(
     val tag:        ExposureTag,
+    val isUpward:   Boolean,
     val data:       Data,
     val sourceInfo: SourceInfo
   ) extends ModuleExposure
 
   final case class Cached(
     val tag:        ExposureTag,
+    val isUpward:   Boolean,
     val datatype:   Data,
     val earlyName:  String,
     val sourceInfo: SourceInfo

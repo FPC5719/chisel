@@ -105,6 +105,7 @@ object CacheableModule {
         case item: ModuleExposure.Real =>
           module.exposures += ModuleExposure.Cached(
             item.tag,
+            item.isUpward,
             chiselTypeOf(item.data),
             item.data.earlyName,
             item.sourceInfo

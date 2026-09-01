@@ -100,11 +100,24 @@ object CacheableModule {
     val module = Builder.State.guard(Builder.State.default) {
       // Elaborate the public accessible interfaces only
       val module: T = bc
+      // Copy exposed ports
+      entry.module.exposures.foreach {
+        case item: ModuleExposure.Real =>
+          module.exposures += ModuleExposure.Cached(
+            item.tag,
+            chiselTypeOf(item.data),
+            item.data.earlyName,
+            item.sourceInfo
+          )
+        case item: ModuleExposure.Cached =>
+          module.exposures += item
+      }
       module.generateComponent()
       module
     }
     Builder.pushCommand(ir.DefInstanceFrom(sourceInfo, module, module._component.get.ports, entry.module))
     module.initializeInParent() // Connect Clock/Reset
+    module.propagateExposure()
     module
   }
 }

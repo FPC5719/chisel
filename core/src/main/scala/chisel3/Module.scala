@@ -58,6 +58,8 @@ object Module extends ModuleObjIntf {
       module.initializeInParent()
     }
 
+    module.propagateExposure()
+
     module
   }
 
@@ -400,6 +402,7 @@ package internal {
 package experimental {
 
   import chisel3.experimental.hierarchy.core.{IsInstantiable, Proto}
+  import scala.reflect.ClassTag
 
   object BaseModule {
     implicit class BaseModuleExtensions[T <: BaseModule](b: T)(implicit si: SourceInfo) {
@@ -1114,7 +1117,60 @@ package experimental {
       _layers
     }
 
+    private[chisel3] val exposureNamespace: Namespace = Namespace.empty
+    private[chisel3] val exposures:         ArrayBuffer[ModuleExposure] = ArrayBuffer.empty
+
+    private[chisel3] def expose(tag: ExposureTag, x: Data)(implicit sourceInfo: SourceInfo): Unit = {
+      exposures += ModuleExposure.Real(tag, x, sourceInfo)
+    }
+
+    private[chisel3] def propagateExposure(): Unit = {
+      Builder.currentModule.map { module =>
+        exposures.foreach { item =>
+          module.expose(item.tag, item.port)(item.sourceInfo)
+        }
+      }
+    }
+
+    atModuleBodyEnd {
+      exposures.foreach { item =>
+        implicit val sourceInfo: SourceInfo = item.sourceInfo
+        item match {
+          case ModuleExposure.Real(_, data, _) =>
+            val seed = exposureNamespace.name(s"x_${data.earlyName}")
+            item.port = IO(Output(chiselTypeOf(data))).suggestName(seed)
+            item.port := data
+          case ModuleExposure.Cached(_, datatype, earlyName, _) =>
+            val seed = exposureNamespace.name(s"x_${earlyName}")
+            item.port = IO(Output(datatype)).suggestName(seed)
+        }
+      }
+    }
+
   }
+}
+
+trait ExposureTag
+
+private[chisel3] sealed trait ModuleExposure {
+  val tag:        ExposureTag
+  val sourceInfo: SourceInfo
+  var port: Data = null
+}
+
+private[chisel3] object ModuleExposure {
+  final case class Real(
+    val tag:        ExposureTag,
+    val data:       Data,
+    val sourceInfo: SourceInfo
+  ) extends ModuleExposure
+
+  final case class Cached(
+    val tag:        ExposureTag,
+    val datatype:   Data,
+    val earlyName:  String,
+    val sourceInfo: SourceInfo
+  ) extends ModuleExposure
 }
 
 /** Creates a block under which any generator that gets run results in a module whose name is prepended with the given prefix.

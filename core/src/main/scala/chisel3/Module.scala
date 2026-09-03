@@ -1133,6 +1133,13 @@ package experimental {
     }
 
     atModuleBodyEnd {
+      if (_parent.isEmpty && !Builder.captureContext().inDefinition && exposures.nonEmpty) {
+        val list = exposures.map {
+          case ModuleExposure.Real(tag, _, data, _)           => s"${tag} => ${data.earlyName}"
+          case ModuleExposure.Cached(tag, _, _, earlyName, _) => s"${tag} => ${earlyName}"
+        }.mkString("\n")
+        throwException(s"Uncollected exposures reach top-level boundary:\n${list}")
+      }
       exposures.foreach { item =>
         implicit val sourceInfo: SourceInfo = item.sourceInfo
         item match {

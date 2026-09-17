@@ -58,7 +58,8 @@ object ChiselStage {
     Seq(
       Dependency[chisel3.stage.phases.Elaborate],
       Dependency[chisel3.stage.phases.AddDebugIntrinsics],
-      Dependency[chisel3.stage.phases.Convert],
+      // The legacy Convert Phase's result is never used
+      // Dependency[chisel3.stage.phases.Convert],
       Dependency[chisel3.stage.phases.AddDedupGroupAnnotations],
       Dependency[circt.stage.phases.AddImplicitOutputFile],
       Dependency[chisel3.stage.phases.AddImplicitOutputAnnotationFile],

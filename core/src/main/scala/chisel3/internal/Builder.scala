@@ -535,6 +535,7 @@ private[chisel3] class DynamicContext(
   val layers = mutable.LinkedHashSet[layer.Layer]()
   val options = mutable.LinkedHashSet[choice.Case]()
   val domains = mutable.LinkedHashSet[domain.Domain]()
+  val choiceDomains = mutable.LinkedHashSet[paramchoice.ChoiceDomain]()
   var currentModule: Option[BaseModule] = None
 
   // Views that do not correspond to a single ReferenceTarget and thus require renaming
@@ -610,9 +611,10 @@ private[chisel3] object Builder extends LazyLogging {
 
   def annotations: ArrayBuffer[() => Seq[Annotation]] = dynamicContext.annotations
 
-  def layers:  mutable.LinkedHashSet[layer.Layer] = dynamicContext.layers
-  def options: mutable.LinkedHashSet[choice.Case] = dynamicContext.options
-  def domains: mutable.LinkedHashSet[domain.Domain] = dynamicContext.domains
+  def layers:        mutable.LinkedHashSet[layer.Layer] = dynamicContext.layers
+  def options:       mutable.LinkedHashSet[choice.Case] = dynamicContext.options
+  def domains:       mutable.LinkedHashSet[domain.Domain] = dynamicContext.domains
+  def choiceDomains: mutable.LinkedHashSet[paramchoice.ChoiceDomain] = dynamicContext.choiceDomains
 
   def contextCache: BuilderContextCache = dynamicContext.contextCache
 
@@ -652,7 +654,8 @@ private[chisel3] object Builder extends LazyLogging {
       def recData(_data: Data): Option[String] = {
         val data = reifySingleTarget(_data).getOrElse(_data)
         data.binding.flatMap {
-          case (_: WireBinding | _: RegBinding | _: MemoryPortBinding | _: OpBinding | _: InstanceChoiceBinding) =>
+          case (_: WireBinding | _: RegBinding | _: MemoryPortBinding | _: OpBinding | _: InstanceChoiceBinding |
+              _: ParamInstanceChoiceBinding) =>
             data.seedOpt
           case ChildBinding(parent) =>
             recData(parent).map { p =>
@@ -1148,6 +1151,11 @@ private[chisel3] object Builder extends LazyLogging {
         )
       }
 
+      val choiceDomainDefs = choiceDomains.iterator.map { domain =>
+        val caseDefs = domain.cases.iterator.map { c => DefChoiceCase(c.name) }.toSeq
+        DefChoiceDomain(domain.name, caseDefs)
+      }.toSeq
+
       // Make the main module (the last component) public if this is not a
       // Circuit created from a Definition.
       components.last match {
@@ -1171,7 +1179,8 @@ private[chisel3] object Builder extends LazyLogging {
           layerAdjacencyList(layer.Layer.Root).map(foldLayers).toSeq,
           optionDefs,
           dynamicContext.suppressSourceInfo,
-          domains.toSeq.map(d => Domain(d.sourceInfo, d.name, d.fields))
+          domains.toSeq.map(d => Domain(d.sourceInfo, d.name, d.fields)),
+          choiceDomainDefs
         )
       (ElaboratedCircuit(circuit, dynamicContext.annotationSeq.toSeq), mod)
     }

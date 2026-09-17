@@ -317,7 +317,8 @@ private[chisel3] object BiConnect {
     // Do not bulk connect instance choices since they need to be expanded field-by-field.
     def instanceChoiceCheck = List(source, sink).forall {
       _.topBinding match {
-        case _: InstanceChoiceBinding => false
+        case _: InstanceChoiceBinding      => false
+        case _: ParamInstanceChoiceBinding => false
         case _ => true
       }
     }

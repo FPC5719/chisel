@@ -283,6 +283,11 @@ case class PathPropertyLiteral(value: String) extends Expression with UseSeriali
 }
 
 @deprecated("All APIs in package firrtl are deprecated.", "Chisel 7.0.0")
+case class ChoicePropertyLiteral(domain: String, value: String) extends Expression with UseSerializer {
+  val tpe = ChoicePropertyType(domain)
+}
+
+@deprecated("All APIs in package firrtl are deprecated.", "Chisel 7.0.0")
 case class SequencePropertyValue(tpe: Type, values: Seq[Expression]) extends Expression with UseSerializer
 
 /** Property primitive operations.
@@ -729,6 +734,9 @@ case class ClassPropertyType(name: String) extends PropertyType
 
 @deprecated("All APIs in package firrtl are deprecated.", "Chisel 7.0.0")
 case object AnyRefPropertyType extends PropertyType
+
+@deprecated("All APIs in package firrtl are deprecated.", "Chisel 7.0.0")
+case class ChoicePropertyType(domain: String) extends PropertyType
 
 @deprecated("All APIs in package firrtl are deprecated.", "Chisel 7.0.0")
 case class DomainType(domain: String) extends Type with UseSerializer

@@ -292,6 +292,15 @@ private[chisel3] object Serializer {
         newLineAndIndent(1)
         b ++= legalize(choice); b ++= " => "; b ++= legalize(module.name)
       }
+    case e @ DefParamInstanceChoice(info, _, default, option, choices) =>
+      b ++= "paraminstchoice "; b ++= legalize(e.name); b ++= " "
+      serialize(option.ref(info), ctx, info)
+      b ++= " of "; b ++= legalize(default.name)
+      b ++= " : "; serialize(e.sourceInfo)
+      choices.foreach { case (choice, module) =>
+        newLineAndIndent(1)
+        b ++= legalize(choice); b ++= " => "; b ++= legalize(module.name)
+      }
     case e @ DefObject(info, _, className) =>
       b ++= "object "; b ++= legalize(e.name); b ++= " of "; b ++= legalize(className); serialize(e.sourceInfo)
     case e @ Stop(_, info, clock, ret) =>
@@ -807,6 +816,20 @@ private[chisel3] object Serializer {
       }
       Iterator(b.toString)
     } else Iterator.empty
+    val choiceDomains = if (circuit.choiceDomains.nonEmpty) {
+      implicit val b = new StringBuilder
+      circuit.choiceDomains.foreach { domain =>
+        newLineAndIndent(1)
+        val width = 1.max(BigInt(domain.cases.length - 1).bitLength)
+        b ++= s"choice_domain ${domain.name} width ${width}:"
+        domain.cases.zipWithIndex.foreach { case (ch, idx) =>
+          newLineAndIndent(2)
+          b ++= s"choice_case ${ch.name} = ${idx}"
+        }
+        newLineNoIndent()
+      }
+      Iterator(b.toString)
+    } else Iterator.empty
     val typeAliases = if (circuit.typeAliases.nonEmpty) {
       implicit val b = new StringBuilder
       circuit.typeAliases.foreach(ta => { b += NewLine; doIndent(1); serialize(ta) })
@@ -819,6 +842,7 @@ private[chisel3] object Serializer {
     val typeAliasesSeq: Seq[String] = circuit.typeAliases.map(_.name)
     prelude ++
       options ++
+      choiceDomains ++
       typeAliases ++
       layers ++
       domains ++

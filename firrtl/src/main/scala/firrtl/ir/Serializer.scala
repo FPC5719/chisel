@@ -120,6 +120,8 @@ object Serializer {
       b ++= s"Bool(${value})"
     case PathPropertyLiteral(value) =>
       b ++= "path(\""; b ++= value; b ++= "\")"
+    case ChoicePropertyLiteral(domain, value) =>
+      b ++= "choice("; b ++= domain; b ++= ", "; b ++= value; b ++= ")"
     case SequencePropertyValue(tpe, values) =>
       b ++= "List<"; s(tpe); b ++= ">(";
       val lastIdx = values.size - 1
@@ -478,26 +480,27 @@ object Serializer {
       }
       s(underlying, true)(b, indent)
     }
-    case UIntType(width: Width)    => b ++= "UInt"; s(width)
-    case SIntType(width: Width)    => b ++= "SInt"; s(width)
-    case BundleType(fields)        => b ++= "{ "; sField(fields, ", "); b += '}'
-    case VectorType(tpe, size)     => s(tpe, lastEmittedConst); b += '['; b ++= size.toString; b += ']'
-    case ClockType                 => b ++= "Clock"
-    case ResetType                 => b ++= "Reset"
-    case AsyncResetType            => b ++= "AsyncReset"
-    case AnalogType(width)         => b ++= "Analog"; s(width)
-    case IntegerPropertyType       => b ++= "Integer"
-    case DoublePropertyType        => b ++= "Double"
-    case StringPropertyType        => b ++= "String"
-    case BooleanPropertyType       => b ++= "Bool"
-    case PathPropertyType          => b ++= "Path"
-    case SequencePropertyType(tpe) => b ++= "List<"; s(tpe, lastEmittedConst); b += '>'
-    case ClassPropertyType(name)   => b ++= "Inst<"; b ++= name; b += '>'
-    case AnyRefPropertyType        => b ++= "AnyRef"
-    case AliasType(name)           => b ++= name
-    case DomainType(domain)        => b ++= "Domain of "; b ++= (domain);
-    case UnknownType               => b += '?'
-    case other                     => b ++= other.serialize // Handle user-defined nodes
+    case UIntType(width: Width)     => b ++= "UInt"; s(width)
+    case SIntType(width: Width)     => b ++= "SInt"; s(width)
+    case BundleType(fields)         => b ++= "{ "; sField(fields, ", "); b += '}'
+    case VectorType(tpe, size)      => s(tpe, lastEmittedConst); b += '['; b ++= size.toString; b += ']'
+    case ClockType                  => b ++= "Clock"
+    case ResetType                  => b ++= "Reset"
+    case AsyncResetType             => b ++= "AsyncReset"
+    case AnalogType(width)          => b ++= "Analog"; s(width)
+    case IntegerPropertyType        => b ++= "Integer"
+    case DoublePropertyType         => b ++= "Double"
+    case StringPropertyType         => b ++= "String"
+    case BooleanPropertyType        => b ++= "Bool"
+    case PathPropertyType           => b ++= "Path"
+    case SequencePropertyType(tpe)  => b ++= "List<"; s(tpe, lastEmittedConst); b += '>'
+    case ClassPropertyType(name)    => b ++= "Inst<"; b ++= name; b += '>'
+    case AnyRefPropertyType         => b ++= "AnyRef"
+    case ChoicePropertyType(domain) => b ++= "Choice of "; b ++= (domain);
+    case AliasType(name)            => b ++= name
+    case DomainType(domain)         => b ++= "Domain of "; b ++= (domain);
+    case UnknownType                => b += '?'
+    case other                      => b ++= other.serialize // Handle user-defined nodes
   }
 
   private def s(node: Direction)(implicit b: StringBuilder, indent: Int): Unit = node match {

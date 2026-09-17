@@ -16,6 +16,7 @@ import scala.collection.immutable.{ArraySeq, NumericRange}
 import scala.math.BigDecimal.RoundingMode
 import scala.annotation.nowarn
 import scala.collection.mutable
+import chisel3.experimental.paramchoice.ChoiceCase
 
 // This object exists so that it can be package private and we don't have to individually mark every class
 private[chisel3] object ir {
@@ -659,6 +660,17 @@ private[chisel3] object ir {
 
   case class DefClass(id: Class, name: String, ports: Seq[Port], block: Block) extends Component
 
+  case class DefChoiceDomain(name: String, cases: Seq[DefChoiceCase])
+  case class DefChoiceCase(name: String)
+
+  case class DefParamInstanceChoice(
+    sourceInfo: SourceInfo,
+    id:         HasId,
+    default:    BaseModule,
+    option:     Property[_ <: ChoiceCase],
+    choices:    Seq[(String, BaseModule)]
+  ) extends Definition
+
   case class Circuit(
     name:               String,
     components:         Seq[Component],
@@ -668,7 +680,8 @@ private[chisel3] object ir {
     layers:             Seq[Layer],
     options:            Seq[DefOption],
     suppressSourceInfo: Boolean,
-    domains:            Seq[Domain]
+    domains:            Seq[Domain],
+    choiceDomains:      Seq[DefChoiceDomain]
   ) {
     def firrtlAnnotations: Iterable[Annotation] = annotations.flatMap(_().flatMap(_.update(renames)))
   }

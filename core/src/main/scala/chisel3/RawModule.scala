@@ -147,6 +147,8 @@ abstract class RawModule extends BaseModule {
             id._forceName(default = "_WIRE", _namespace)
           case InstanceChoiceBinding(_, _) =>
             id._forceName(default = "_INST", _namespace)
+          case ParamInstanceChoiceBinding(_, _) =>
+            id._forceName(default = "_INST", _namespace)
           // probes have their refs set eagerly
           case _ => // don't name literals
         }

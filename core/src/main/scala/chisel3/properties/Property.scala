@@ -14,6 +14,7 @@ import chisel3.experimental.hierarchy.Instance
 import scala.annotation.{implicitAmbiguous, implicitNotFound}
 import chisel3.experimental.BaseModule
 import chisel3.internal.NamedComponent
+import chisel3.experimental.paramchoice.ChoiceCase
 
 /** PropertyType defines a typeclass for valid Property types.
   *
@@ -153,6 +154,18 @@ private[chisel3] object PropertyType extends LowPriorityPropertyTypeInstances {
     makeSimple[Boolean](fir.BooleanPropertyType, fir.BooleanPropertyLiteral(_))
 
   implicit val pathTypeInstance: SimplePropertyType[Path] = makeSimple[Path](fir.PathPropertyType, _.convert())
+
+  implicit def choiceTypeInstance[CaseT <: ChoiceCase](
+    implicit provider: ChoiceTypeProvider[CaseT]
+  ): RecursivePropertyType.Aux[CaseT, CaseT, ChoiceCase] =
+    new RecursivePropertyType[CaseT] {
+      type Type = CaseT
+      type Underlying = ChoiceCase
+      override def getPropertyType(): fir.PropertyType = fir.ChoicePropertyType(provider.domainName)
+      override def convert(value: Underlying, ctx: ir.Component, info: SourceInfo): fir.Expression =
+        fir.ChoicePropertyLiteral(value.domain.name, value.name)
+      override def convertUnderlying(value: CaseT, info: SourceInfo): Underlying = value
+    }
 
   implicit def modulePathTypeInstance[M <: BaseModule]: RecursivePropertyType.Aux[M, Path, Path] =
     new RecursivePropertyType[M] {
@@ -461,6 +474,10 @@ private[chisel3] object ClassTypeProvider {
     val classType = _classType
   }
 }
+
+private[chisel3] case class ChoiceTypeProvider[A](
+  val domainName: String
+)
 
 /** Helpers for building Property expressions.
   */

@@ -16,7 +16,8 @@ trait ChoiceCase {
 }
 
 abstract class ChoiceDomain {
-  private[chisel3] def name: String = simpleClassName(this.getClass())
+  private[chisel3] val name: String =
+    Builder.globalNamespace.name(simpleClassName(this.getClass()))
 
   final class Case private[chisel3] (
     val name:   String,

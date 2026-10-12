@@ -7,7 +7,7 @@ import chisel3.internal.firrtl.ir
 import chisel3.internal.throwException
 import scala.reflect.ClassTag
 
-abstract class CacheableKey[T <: BaseModule with CacheableModule] {
+abstract class CacheableKey[T <: CacheableModule.CacheableBaseModule] {
   def cacheKey(args: Seq[Any]): Any = ()
 }
 
@@ -16,15 +16,23 @@ trait CacheableModule { self: BaseModule =>
 }
 
 object CacheableModule {
+  type CacheableBaseModule = BaseModule with CacheableModule
+
   private case class CacheEntry(
     circuit: ElaboratedCircuit,
-    module:  BaseModule
+    module:  CacheableBaseModule
   )
 
   private case class CacheKey(
     moduleClass: ClassTag[_],
     cacheKey:    Any
   ) extends BuilderContextCache.Key[CacheEntry]
+
+  sealed trait ElaborationPhase
+  final case object Defining extends ElaborationPhase
+  final case class Instancing(
+    fullDefinition: CacheableBaseModule
+  ) extends ElaborationPhase
 
   private def getDynamicContext: DynamicContext = {
     val context = Builder.captureContext()
@@ -51,13 +59,13 @@ object CacheableModule {
   }
 
   private def elaborateWrapper[
-    T <: BaseModule with CacheableModule
-  ](bc: => T)(implicit sourceInfo: SourceInfo): T = {
+    T <: CacheableBaseModule
+  ](bc: (ElaborationPhase) => T)(implicit sourceInfo: SourceInfo): T = {
     Builder.readyForModuleConstr = true
     Builder.elaborationTrace.pushModule()
     val savedPrefixStack = Builder.getModulePrefixStack
     val module = Builder.State.guard(Builder.State.default) {
-      val module: T = bc
+      val module: T = bc(Defining)
       module.generateComponent().foreach(Builder.components += _)
       if (module.localModulePrefix.isDefined)
         Builder.popModulePrefix()
@@ -71,15 +79,15 @@ object CacheableModule {
   }
 
   def apply[
-    T <: BaseModule with CacheableModule: ClassTag: CacheableKey
-  ](bc: => T, args: Any*)(implicit sourceInfo: SourceInfo): T = {
+    T <: CacheableBaseModule: ClassTag: CacheableKey
+  ](bc: (ElaborationPhase) => T, args: Any*)(implicit sourceInfo: SourceInfo): T = {
     val key = CacheKey(implicitly[ClassTag[T]], implicitly[CacheableKey[T]].cacheKey(args))
     val dynctx = getDynamicContext
     val entry = Builder.contextCache.getOrElseUpdate(
       key, {
         val (ir, module) = Builder.build(
-          elaborateWrapper {
-            val mod = bc
+          elaborateWrapper { phase =>
+            val mod = bc(phase)
             mod.buildModule()
             mod
           },
@@ -99,7 +107,7 @@ object CacheableModule {
     Builder.readyForModuleConstr = true
     val module = Builder.State.guard(Builder.State.default) {
       // Elaborate the public accessible interfaces only
-      val module: T = bc
+      val module: T = bc(Instancing(entry.module))
       // Copy exposed ports
       entry.module.exposures.foreach {
         case item: ModuleExposure.Real =>
@@ -120,5 +128,11 @@ object CacheableModule {
     module.initializeInParent() // Connect Clock/Reset
     module.propagateExposure()
     module
+  }
+
+  def apply[
+    T <: CacheableBaseModule: ClassTag: CacheableKey
+  ](bc: => T, args: Any*)(implicit sourceInfo: SourceInfo): T = {
+    apply(_ => bc, args*)
   }
 }

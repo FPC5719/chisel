@@ -1166,6 +1166,13 @@ package experimental {
   }
 }
 
+/** Marker for a tag that identifies an exposed value.
+  *
+  * Implement this trait (typically with a `case object` or a small `sealed trait`) to describe a
+  * category of exposed value, pass an instance to
+  * [[chisel3.util.experimental.ExposureUtils.expose]], and later retrieve every value with that tag
+  * using [[chisel3.util.experimental.ExposureUtils.collect]].
+  */
 trait ExposureTag
 
 private[chisel3] sealed trait ModuleExposure {

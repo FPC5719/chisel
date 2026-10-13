@@ -9,7 +9,47 @@ import chisel3.internal.binding.ParamInstanceChoiceBinding
 import chisel3.properties.Property
 import chisel3.experimental.{BaseModule, SourceInfo}
 
+/** Instantiates one of several interchangeable module implementations and selects among them with
+  * a run-time `Property` value.
+  *
+  * This is the parameterized counterpart of [[chisel3.choice.ModuleChoice]]: instead of a
+  * compile-time [[chisel3.choice.Group]], the selection is a [[chisel3.properties.Property]] whose
+  * type is a [[ChoiceDomain.Case]]. The default implementation and every alternative must expose
+  * type-equivalent IO bundles, and the choice is lowered to a FIRRTL `paraminstchoice` statement
+  * that downstream tools resolve to a concrete implementation.
+  *
+  * {{{
+  * object Platform extends ChoiceDomain {
+  *   val FPGA = Case("FPGA")
+  *   val ASIC = Case("ASIC")
+  * }
+  *
+  * class Top extends Module {
+  *   val select = IO(Input(Property[Platform.Case]()))
+  *   val impl = ParamModuleChoice(select, new DefaultImpl, Seq(
+  *     Platform.FPGA -> new FpgaImpl,
+  *     Platform.ASIC -> new AsicImpl
+  *   ))
+  * }
+  * }}}
+  */
 object ParamModuleChoice {
+
+  /** Builds the implementations of `default` and `choices` and emits a parameterized instance
+    * choice over `select`.
+    *
+    * The default module and each alternative are elaborated with [[chisel3.Module.evaluate]]; a
+    * diagnostic is reported if any alternative's IO is not type-equivalent to the default's IO.
+    * The returned IO is bound so that the selected implementation is transparent to the enclosing
+    * module, which connects to it exactly as it would to a single module instance.
+    *
+    * @param select  the property that selects the active implementation
+    * @param default the module instantiated when the selection is not one of `choices`
+    * @param choices the mapping from choice cases to lazily constructed module generators
+    * @tparam T     the IO bundle type shared by every implementation
+    * @tparam CaseT the [[ChoiceCase]] type of the selection property
+    * @return the IO bundle of the selected implementation, for use in the enclosing module
+    */
   def apply[T <: Data, CaseT <: ChoiceCase](
     select:  Property[CaseT],
     default: => FixedIOBaseModule[T],

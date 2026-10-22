@@ -118,7 +118,7 @@ object CacheableModule {
     * [[CacheableModule.buildModule]] is called once the constructor returns, to emit the module
     * body.
     */
-  final case object Defining extends ElaborationPhase
+  case object Defining extends ElaborationPhase
 
   /** The constructor is being evaluated to create an additional instance of a definition that has
     * already been elaborated.
@@ -184,6 +184,10 @@ object CacheableModule {
     * the shared definition. Every call, including the first, then evaluates `bc` again with
     * [[Instancing]] to produce the returned instance and ties it to the definition.
     *
+    * Hardware and metadata exposures recorded while building the cached definition are forwarded
+    * to each created instance. Metadata exposures remain metadata; hardware exposures become
+    * cached port exposures using the original port type and name.
+    *
     * @param bc   the module constructor; it is evaluated once per phase
     * @param args trailing arguments, forwarded to the [[CacheableKey]] to select the definition
     * @tparam T   the cacheable module type
@@ -219,8 +223,11 @@ object CacheableModule {
     val module = Builder.State.guard(Builder.State.default) {
       // Elaborate the public accessible interfaces only
       val module: T = bc(Instancing(entry.module))
-      // Copy exposed ports
+      // Forward exposures from the shared definition to this instance. Metadata stays metadata,
+      // while port-backed exposures are rebuilt from their cached port type.
       entry.module.exposures.foreach {
+        case item: ModuleExposure.Metadata =>
+          module.exposures += item
         case item: ModuleExposure.Real =>
           module.exposures += ModuleExposure.Cached(
             item.tag,

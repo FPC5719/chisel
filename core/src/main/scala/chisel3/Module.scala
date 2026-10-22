@@ -1124,41 +1124,55 @@ package experimental {
       exposures += ModuleExposure.Real(tag, isUpward, x, sourceInfo)
     }
 
+    private[chisel3] def exposeMetadata(tag: ExposureTag)(implicit sourceInfo: SourceInfo): Unit = {
+      exposures += ModuleExposure.Metadata(tag, sourceInfo)
+    }
+
     private[chisel3] def propagateExposure(): Unit = {
       Builder.currentModule.map { module =>
         exposures.foreach { item =>
-          module.expose(item.tag, item.isUpward, item.port)(item.sourceInfo)
+          implicit val sourceInfo: SourceInfo = item.sourceInfo
+          item match {
+            case e: ModuleExposure.Metadata => module.exposeMetadata(e.tag)
+            case e: ModuleExposure.Real     => module.expose(e.tag, e.isUpward, e.port)
+            case e: ModuleExposure.Cached   => module.expose(e.tag, e.isUpward, e.port)
+          }
         }
       }
     }
 
     atModuleBodyEnd {
-      if (_parent.isEmpty && !Builder.captureContext().inDefinition && exposures.nonEmpty) {
-        val list = exposures.map {
-          case ModuleExposure.Real(tag, _, data, _)           => s"${tag} => ${data.earlyName}"
-          case ModuleExposure.Cached(tag, _, _, earlyName, _) => s"${tag} => ${earlyName}"
-        }.mkString("\n")
-        throwException(s"Uncollected exposures reach top-level boundary:\n${list}")
-      }
-      exposures.foreach { item =>
-        implicit val sourceInfo: SourceInfo = item.sourceInfo
-        item match {
-          case ModuleExposure.Real(_, isUpward, data, _) =>
-            val seed = exposureNamespace.name(s"x_${data.earlyName}")
-            if (isUpward) {
-              item.port = IO(Output(chiselTypeOf(data))).suggestName(seed)
-              item.port := data
-            } else {
-              item.port = IO(Input(chiselTypeOf(data))).suggestName(seed)
-              data := item.port
-            }
-          case ModuleExposure.Cached(_, isUpward, datatype, earlyName, _) =>
-            val seed = exposureNamespace.name(s"x_${earlyName}")
-            if (isUpward) {
-              item.port = IO(Output(datatype)).suggestName(seed)
-            } else {
-              item.port = IO(Input(datatype)).suggestName(seed)
-            }
+      if (exposures.nonEmpty) {
+        if (_parent.isEmpty && !Builder.captureContext().inDefinition) {
+          val list = exposures.map {
+            case e: ModuleExposure.Metadata => s"${e.tag}"
+            case e: ModuleExposure.Real     => s"${e.tag} => ${e.data.earlyName}"
+            case e: ModuleExposure.Cached   => s"${e.tag} => ${e.earlyName}"
+          }.mkString("\n")
+          throwException(s"Uncollected exposures reach top-level boundary:\n${list}")
+        }
+
+        exposures.foreach { item =>
+          implicit val sourceInfo: SourceInfo = item.sourceInfo
+          item match {
+            case e: ModuleExposure.Metadata => // Metadata does not need port
+            case e: ModuleExposure.Real =>
+              val seed = exposureNamespace.name(s"x_${e.data.earlyName}")
+              if (e.isUpward) {
+                e.port = IO(Output(chiselTypeOf(e.data))).suggestName(seed)
+                e.port := e.data
+              } else {
+                e.port = IO(Input(chiselTypeOf(e.data))).suggestName(seed)
+                e.data := e.port
+              }
+            case e: ModuleExposure.Cached =>
+              val seed = exposureNamespace.name(s"x_${e.earlyName}")
+              if (e.isUpward) {
+                e.port = IO(Output(e.datatype)).suggestName(seed)
+              } else {
+                e.port = IO(Input(e.datatype)).suggestName(seed)
+              }
+          }
         }
       }
     }
@@ -1166,29 +1180,36 @@ package experimental {
   }
 }
 
-/** Marker for a tag that identifies an exposed value.
+/** Marker for a tag that identifies an exposed value or a metadata-only exposure.
   *
   * Implement this trait (typically with a `case object` or a small `sealed trait`) to describe a
   * category of exposed value, pass an instance to
   * [[chisel3.util.experimental.ExposureUtils.expose]], and later retrieve every value with that tag
-  * using [[chisel3.util.experimental.ExposureUtils.collect]].
+  * using [[chisel3.util.experimental.ExposureUtils.collect]]. Tags can also be attached without a
+  * hardware value using [[chisel3.util.experimental.ExposureUtils.exposeMetadata]] and retrieved
+  * with [[chisel3.util.experimental.ExposureUtils.collectMetadata]].
   */
 trait ExposureTag
 
 private[chisel3] sealed trait ModuleExposure {
   val tag:        ExposureTag
-  val isUpward:   Boolean
   val sourceInfo: SourceInfo
-  var port: Data = null
 }
 
 private[chisel3] object ModuleExposure {
+  final case class Metadata(
+    val tag:        ExposureTag,
+    val sourceInfo: SourceInfo
+  ) extends ModuleExposure
+
   final case class Real(
     val tag:        ExposureTag,
     val isUpward:   Boolean,
     val data:       Data,
     val sourceInfo: SourceInfo
-  ) extends ModuleExposure
+  ) extends ModuleExposure {
+    var port: Data = null
+  }
 
   final case class Cached(
     val tag:        ExposureTag,
@@ -1196,7 +1217,9 @@ private[chisel3] object ModuleExposure {
     val datatype:   Data,
     val earlyName:  String,
     val sourceInfo: SourceInfo
-  ) extends ModuleExposure
+  ) extends ModuleExposure {
+    var port: Data = null
+  }
 }
 
 /** Creates a block under which any generator that gets run results in a module whose name is prepended with the given prefix.

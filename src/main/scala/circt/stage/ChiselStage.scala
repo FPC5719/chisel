@@ -7,7 +7,6 @@ import chisel3.stage.{ChiselCircuitAnnotation, ChiselGeneratorAnnotation, Circui
 import chisel3.stage.CircuitSerializationAnnotation.FirrtlFileFormat
 import firrtl.{annoSeqToSeq, seqToAnnoSeq, AnnotationSeq, EmittedVerilogCircuitAnnotation}
 import firrtl.options.{CustomFileEmission, Dependency, Phase, PhaseManager, Stage, StageMain, Unserializable}
-import firrtl.stage.FirrtlCircuitAnnotation
 import logger.LogLevelAnnotation
 import firrtl.EmittedBtor2CircuitAnnotation
 
@@ -58,8 +57,7 @@ object ChiselStage {
     Seq(
       Dependency[chisel3.stage.phases.Elaborate],
       Dependency[chisel3.stage.phases.AddDebugIntrinsics],
-      // The legacy Convert Phase's result is never used
-      // Dependency[chisel3.stage.phases.Convert],
+      Dependency[chisel3.stage.phases.Convert],
       Dependency[chisel3.stage.phases.AddDedupGroupAnnotations],
       Dependency[circt.stage.phases.AddImplicitOutputFile],
       Dependency[chisel3.stage.phases.AddImplicitOutputAnnotationFile],
@@ -137,17 +135,7 @@ object ChiselStage {
     gen:  => RawModule,
     args: Array[String] = Array.empty
   ): firrtl.ir.Circuit = {
-    val annos = Seq(
-      ChiselGeneratorAnnotation(() => gen),
-      CIRCTTargetAnnotation(CIRCTTarget.CHIRRTL)
-    ) ++ (new Shell("circt")).parse(args)
-
-    phase
-      .transform(annos)
-      .collectFirst { case FirrtlCircuitAnnotation(a) =>
-        a
-      }
-      .get
+    chisel3.stage.phases.Convert.legacyCircuit(elaborate(gen, args))
   }
 
   /** Compile a Chisel circuit to FIRRTL dialect */

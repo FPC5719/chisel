@@ -5,6 +5,7 @@ package chisel3.experimental.util
 import geny.Readable
 import chisel3.RawModule
 import chisel3.experimental.{SerializableModule, SerializableModuleGenerator, SerializableModuleParameter}
+import chisel3.stage.ChiselCircuitAnnotation
 import firrtl.annotations.Annotation
 
 import scala.reflect.runtime.universe
@@ -47,7 +48,7 @@ trait SerializableModuleElaborator {
   )(
     implicit rwP: upickle.default.Reader[P]
   ): (Readable, Readable) = {
-    var fir: firrtl.ir.Circuit = null
+    var fir: String = null
     val annos = Seq(
       new chisel3.stage.phases.Elaborate,
       new chisel3.stage.phases.Convert
@@ -64,13 +65,13 @@ trait SerializableModuleElaborator {
       ) ++ additionalAnnotations
     ) { case (annos, stage) => stage.transform(annos) }
       .flatMap {
-        case firrtl.stage.FirrtlCircuitAnnotation(circuit) =>
-          fir = circuit
+        case anno: ChiselCircuitAnnotation =>
+          fir = anno.elaboratedCircuit.serialize(Nil)
           None
         case _: firrtl.options.Unserializable => None
         case a => Some(a)
       }
-    val firrtlStream: Readable = fir.serialize
+    val firrtlStream: Readable = fir
     val annoStream:   Readable = firrtl.annotations.JsonProtocol.serializeRecover(annos)
     (firrtlStream, annoStream)
   }

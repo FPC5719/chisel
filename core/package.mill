@@ -35,6 +35,7 @@ trait Core extends ChiselCrossModule with HasScala2MacroAnno with HasCommonOptio
   def buildInfo = Task {
     val outputFile = Task.dest / "chisel3" / "BuildInfo.scala"
     val firtoolVersionString = "Some(\"" + v.firtoolVersion + "\")"
+    val firtoolResolverVersionString = "\"" + v.firtoolResolverVersion + "\""
     val contents =
       s"""
          |package chisel3
@@ -43,6 +44,7 @@ trait Core extends ChiselCrossModule with HasScala2MacroAnno with HasCommonOptio
          |  val version: String = "${v.version()}"
          |  val scalaVersion: String = "${scalaVersion()}"
          |  val firtoolVersion: scala.Option[String] = $firtoolVersionString
+         |  val firtoolResolverVersion: String = $firtoolResolverVersionString
          |  override val toString: String = {
          |    "buildInfoPackage: %s, version: %s, scalaVersion: %s, firtoolVersion %s".format(
          |        buildInfoPackage, version, scalaVersion, firtoolVersion

@@ -1,3 +1,5 @@
 {
-  "version": "firtool-1.160.0"
+  "version": "firtool-1.162.0-param",
+  "url": "https://github.com/OpenXiangShan/circt/releases/download/firtool-1.162.0-param-20261111/firtool-1.162.0-param-ubuntu-20.04",
+  "circt-test-version": "firtool-1.160.0"
 }

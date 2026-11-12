@@ -3,7 +3,7 @@
 package circt.stage.phases
 
 import _root_.logger.{LogLevel, Logger}
-import chisel3.BuildInfo.{firtoolVersion, version => chiselVersion}
+import chisel3.BuildInfo.{firtoolResolverVersion, firtoolVersion, version => chiselVersion}
 import chisel3.InternalErrorException
 import chisel3.experimental.hierarchy.core.ImportDefinitionAnnotation
 import chisel3.stage.{ChiselCircuitAnnotation, ChiselOptions, ChiselOptionsView, DesignAnnotation, SourceRootAnnotation}
@@ -211,9 +211,8 @@ class CIRCT extends Phase {
     val circtAnnotationFilename = "circt.anno.json"
 
     val binary = circtOptions.firtoolBinaryPath.getOrElse {
-      // .get is safe, firtoolVersion is an Option for backwards compatibility
-      val version = firtoolVersion.get
-      val resolved = firtoolresolver.Resolve(new LoggerShim(logger), version)
+      // The resolver source is either a version or version@url.
+      val resolved = firtoolresolver.Resolve(new LoggerShim(logger), firtoolResolverVersion)
       resolved match {
         case Left(msg) =>
           throw new Exceptions.FirtoolNotFound(msg)

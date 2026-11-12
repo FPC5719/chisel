@@ -33,10 +33,16 @@ object v extends Module {
     os.read(moduleDir / os.up / "etc" / "circt.json")
   )
 
-  val firtoolVersion = {
+  val circtInfo = {
     val j = _root_.upickle.default.read[Map[String, String]](circtJson)
-    j("version").stripPrefix("firtool-")
+    j
   }
+  // The firtool used by consumers through firtool-resolver.
+  val firtoolVersion = circtInfo("version").stripPrefix("firtool-")
+  val firtoolResolverVersion =
+    circtInfo.get("url").map(url => s"$firtoolVersion@$url").getOrElse(firtoolVersion)
+  // CIRCT binaries used by unitTest and lit. These are not published.
+  val circtTestVersion = circtInfo("circt-test-version").stripPrefix("firtool-")
   val pluginScalaCrossVersions = {
     val scala213: Seq[String] = 0.to(18).map("2.13." + _)
     val scala33:  Seq[String] = 7.to(8).map("3.3." + _)
@@ -89,7 +95,7 @@ object v extends Module {
   val jmhVersion = "1.37"
   val osLib = mvn"com.lihaoyi::os-lib:0.10.7" // 0.11 requires Java 11
   val upickle = mvn"com.lihaoyi::upickle:3.3.1" // upickle 4.0 requires Scala 3.4 (we target Scala 3.3 LTS)
-  val firtoolResolver = mvn"org.chipsalliance::firtool-resolver:2.1.1"
+  val firtoolResolver = mvn"cc.xiangshan:firtool-resolver_2.13:2.2.0"
   val scalatest = mvn"org.scalatest::scalatest:3.2.20"
   val scalacheck = mvn"org.scalatestplus::scalacheck-1-18:3.2.19.0"
   val json4s = mvn"io.github.json4s::json4s-native:4.1.0"
@@ -283,7 +289,7 @@ object circt extends Module {
         val tarPath = Task.dest / "circt.tar.gz"
         if (!os.exists(tarPath)) {
           val url = circt(
-            v.firtoolVersion,
+            v.circtTestVersion,
             if (linux) "linux" else if (mac) "macos" else throw new Exception("unsupported os"),
             // circt does not yet publish for macos-aarch64, use x64 for now
             if (amd64 || mac) "x64" else throw new Exception("unsupported arch")

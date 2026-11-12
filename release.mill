@@ -18,10 +18,10 @@ trait ChiselPublishModule extends SonatypeCentralPublishModule {
   // Publish information
   def pomSettings = PomSettings(
     description = artifactName(),
-    organization = "org.chipsalliance",
+    organization = "cc.xiangshan",
     url = "https://www.chisel-lang.org",
     licenses = Seq(License.`Apache-2.0`),
-    versionControl = VersionControl.github("chipsalliance", "chisel"),
+    versionControl = VersionControl.github("OpenXiangShan", "chisel"),
     developers = Seq(
       Developer("jackkoenig", "Jack Koenig", "https://github.com/jackkoenig"),
       Developer("azidar", "Adam Izraelevitz", "https://github.com/azidar"),
